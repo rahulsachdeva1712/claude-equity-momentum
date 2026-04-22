@@ -1,0 +1,84 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="tab-body" hx-get="/paper" hx-trigger="every 30s" hx-select=".tab-body" hx-target=".tab-body" hx-swap="outerHTML">
+  <h2>Paper Trading</h2>
+
+  <div class="tiles">
+    <div class="tile">
+      <div class="tile-label">Today's MTM</div>
+      <div class="tile-value">Rs {{ '%.2f'|format(summary.today_mtm) }}</div>
+    </div>
+    <div class="tile">
+      <div class="tile-label">Today Realized</div>
+      <div class="tile-value">Rs {{ '%.2f'|format(summary.today_realized) }}</div>
+    </div>
+    <div class="tile">
+      <div class="tile-label">Unrealized P&amp;L</div>
+      <div class="tile-value">Rs {{ '%.2f'|format(summary.today_unrealized) }}</div>
+    </div>
+    <div class="tile">
+      <div class="tile-label">Cumulative P&amp;L</div>
+      <div class="tile-value">Rs {{ '%.2f'|format(summary.cumulative) }}</div>
+    </div>
+    <div class="tile"><div class="tile-label">Open Positions</div><div class="tile-value">{{ summary.open_positions }}</div></div>
+    <div class="tile"><div class="tile-label">Closed Fills</div><div class="tile-value">{{ summary.closed_fills }}</div></div>
+  </div>
+
+  <h3>Signals For Today</h3>
+  <table class="data">
+    <thead><tr><th>Symbol</th><th>Rank</th><th>Target Qty</th><th>Weight</th><th>Ref Price</th><th>Selected</th></tr></thead>
+    <tbody>
+      {% for s in signals %}
+      <tr><td>{{ s.symbol }}</td><td>{{ s.rank_by_126d }}</td><td>{{ s.target_qty }}</td>
+          <td>{{ '%.4f'|format(s.target_weight or 0) }}</td><td>{{ '%.2f'|format(s.reference_price or 0) }}</td>
+          <td>{{ 'yes' if s.selected else 'no' }}</td></tr>
+      {% else %}<tr><td colspan="6" class="muted">No signals for today.</td></tr>{% endfor %}
+    </tbody>
+  </table>
+
+  <div class="charts">
+    <div id="chart-daily"></div>
+    <div id="chart-cum"></div>
+  </div>
+
+  <h3>Current Paper Book</h3>
+  <table class="data">
+    <thead><tr><th>Symbol</th><th>Qty</th><th>Avg Cost</th><th>Cost Basis</th><th>Updated</th></tr></thead>
+    <tbody>
+      {% for b in book %}
+      <tr><td>{{ b.symbol }}</td><td>{{ b.qty }}</td><td>{{ '%.2f'|format(b.avg_cost) }}</td>
+          <td>{{ '%.2f'|format(b.cost_basis) }}</td><td>{{ b.updated_at }}</td></tr>
+      {% else %}<tr><td colspan="5" class="muted">Empty.</td></tr>{% endfor %}
+    </tbody>
+  </table>
+
+  <h3>Recent Fills</h3>
+  <table class="data">
+    <thead><tr><th>Date</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Price</th><th>Charges</th><th>Non-broker</th></tr></thead>
+    <tbody>
+      {% for f in fills %}
+      <tr><td>{{ f.session_date }}</td><td>{{ f.symbol }}</td><td>{{ f.side }}</td><td>{{ f.fill_qty }}</td>
+          <td>{{ '%.2f'|format(f.fill_price) }}</td><td>{{ '%.2f'|format(f.charges_total) }}</td>
+          <td>{{ '%.2f'|format(f.non_broker_charges or 0) }}</td></tr>
+      {% else %}<tr><td colspan="7" class="muted">No fills yet.</td></tr>{% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<script>
+(function() {
+  const pts = {{ pnl_series|tojson }};
+  const x = pts.map(p => p.session_date);
+  const daily = pts.map(p => p.mtm - (p.realized - 0));
+  Plotly.newPlot("chart-daily",
+    [{x, y: pts.map(p => p.mtm), type: "scatter", mode: "lines+markers", name: "Daily MTM"}],
+    {title: "Daily Paper P&L", margin: {t: 30}});
+  const cum = [];
+  let acc = 0;
+  for (const p of pts) { acc += p.mtm; cum.push(acc); }
+  Plotly.newPlot("chart-cum",
+    [{x, y: cum, type: "scatter", mode: "lines+markers", name: "Cumulative"}],
+    {title: "Cumulative Paper P&L", margin: {t: 30}});
+})();
+</script>
+{% endblock %}

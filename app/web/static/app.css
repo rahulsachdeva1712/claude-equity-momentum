@@ -1,0 +1,60 @@
+:root { --fg:#1b1d22; --muted:#6b7280; --bg:#fafafa; --card:#fff; --border:#e5e7eb;
+        --ok:#059669; --warn:#d97706; --bad:#dc2626; --accent:#2563eb; }
+* { box-sizing: border-box; }
+body { margin:0; font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+       color: var(--fg); background: var(--bg); font-size: 13px; }
+.muted { color: var(--muted); }
+
+.top-bar { display:flex; justify-content:space-between; align-items:center;
+           padding: 10px 16px; background: var(--card); border-bottom: 1px solid var(--border); }
+.top-bar .brand { font-size: 14px; }
+.top-bar .pills { display:flex; gap:8px; align-items:center; }
+.pill { padding: 3px 8px; border-radius: 999px; background:#f3f4f6; font-size:12px; }
+.pill.ok, .pill.live-on, .pill.token-valid, .pill.market-open { background:#ecfdf5; color:var(--ok); }
+.pill.bad, .pill.live-off, .pill.token-expired, .pill.market-closed { background:#fef2f2; color:var(--bad); }
+.pill.token-expiring, .pill.market-unknown { background:#fff7ed; color:var(--warn); }
+
+.icon-btn, .btn { cursor:pointer; padding: 4px 10px; border-radius: 6px;
+                  border: 1px solid var(--border); background: var(--card); font-size: 12px; }
+.btn.primary { background: var(--accent); color: #fff; border-color: transparent; }
+.btn.danger  { background: var(--bad); color: #fff; border-color: transparent; }
+.btn-small { font-size:11px; padding: 2px 6px; border-radius: 4px; border:1px solid var(--border); background:#fff; cursor:pointer; }
+
+.tabs { display:flex; gap:0; border-bottom: 1px solid var(--border); background:#fff; }
+.tabs a { padding: 10px 16px; text-decoration: none; color: var(--muted); border-bottom:2px solid transparent; }
+.tabs a.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
+
+main { padding: 16px; max-width: 1200px; margin: 0 auto; }
+h2 { margin: 0 0 12px; }
+h3 { margin: 24px 0 8px; font-size: 14px; }
+
+.tiles { display:grid; grid-template-columns: repeat(6, 1fr); gap: 12px; }
+.tile { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; }
+.tile-label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+.tile-value { font-size: 18px; font-weight: 600; margin-top: 4px; }
+
+table.data { width: 100%; border-collapse: collapse; background: var(--card);
+             border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+table.data th, table.data td { padding: 6px 10px; border-bottom: 1px solid var(--border); text-align: left; font-variant-numeric: tabular-nums; }
+table.data th { background:#f9fafb; font-weight:600; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+
+.charts { display:grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 12px; }
+.charts > div { background: var(--card); border: 1px solid var(--border); border-radius: 6px; height: 280px; }
+
+.banner { padding: 10px 14px; border-radius: 6px; margin-bottom: 12px; }
+.banner.banner-off { background:#fef2f2; color: var(--bad); border: 1px solid #fecaca; }
+
+.modal { position: fixed; inset: 0; background: rgba(0,0,0,.3); display: none; align-items: center; justify-content: center; z-index: 50; }
+.modal.open { display:flex; }
+.modal-card { background: #fff; border-radius: 10px; padding: 18px; width: 520px; max-width: 92vw; }
+.modal-card header { display:flex; justify-content: space-between; align-items: center; }
+.modal-card section { margin-top: 14px; padding-top: 10px; border-top: 1px solid var(--border); }
+.alerts { list-style: none; padding: 0; margin: 0; display:flex; flex-direction: column; gap: 6px; }
+.alert { display:flex; gap: 8px; align-items: center; padding: 6px 8px; background:#f9fafb; border-radius: 6px; }
+.alert .sev { font-size: 10px; padding: 2px 6px; border-radius: 4px; text-transform: uppercase; background:#e5e7eb; }
+.alert.alert-warn .sev { background: #fff7ed; color: var(--warn); }
+.alert.alert-error .sev, .alert.alert-critical .sev { background: #fef2f2; color: var(--bad); }
+.alert .src { color: var(--muted); font-size: 11px; }
+.alert .msg { flex: 1; }
+
+code { background:#f3f4f6; padding: 1px 4px; border-radius: 4px; }

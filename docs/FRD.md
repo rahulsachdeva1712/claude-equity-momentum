@@ -402,5 +402,6 @@ Mandatory alert sources:
 | Date | Change | Driven by |
 |---|---|---|
 | 2026-04-22 | Initial Part B added covering paper, live, Dhan integration, scheduler, processes, UI, data model. | Requirements discussion. |
+| 2026-04-22 | Added one-click launchers `run.bat` / `run.sh` and stoppers `stop.bat` / `stop.sh`. First run creates venv, installs deps, seeds `.env`; subsequent runs start worker + web and open the UI. Stoppers send SIGTERM so PID files are cleaned per B.10; forced kills are recovered on next start by the stale-PID cleanup. | User request. |
 
 Future edits to this FRD must add a row above with the date, the change summary, and the driver.
