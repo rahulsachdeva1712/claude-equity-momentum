@@ -19,8 +19,18 @@ pip install -e ".[dev]"
 
 ## Run
 
+**Windows (one-click):** double-click `run.bat`. First run creates the venv, installs deps, and opens Notepad for you to paste Dhan credentials into `%USERPROFILE%\.claude-equity-momentum\.env`. Second run launches worker + web and opens the UI.
+
+**Linux / macOS (one-click):** `./run.sh`. Same sequence.
+
+**Stop:** `stop.bat` / `./stop.sh` — sends SIGTERM so PID files are cleaned (FRD B.10). If the app is killed forcibly, the next launch detects and cleans the stale PID file automatically.
+
+**Manual run:**
+
 ```bash
-# First time: create state dir and paste creds
+python -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev]"
+
 mkdir -p ~/.claude-equity-momentum
 cp .env.example ~/.claude-equity-momentum/.env
 chmod 600 ~/.claude-equity-momentum/.env
