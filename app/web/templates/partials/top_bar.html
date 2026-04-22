@@ -1,0 +1,19 @@
+<header class="top-bar" hx-get="/partials/top-bar" hx-trigger="every 5s" hx-swap="outerHTML">
+  <div class="brand">
+    <strong>Equity Momentum Rebalance</strong>
+    <span class="muted">&nbsp;&middot;&nbsp;{{ now }}</span>
+  </div>
+  <div class="pills">
+    <span class="pill {% if bar.worker_alive %}ok{% else %}bad{% endif %}">
+      worker: {{ 'running' if bar.worker_alive else 'stopped' }}
+    </span>
+    <span class="pill token-{{ bar.token_state }}">token: {{ bar.token_label }}</span>
+    <span class="pill market-{{ bar.market_status }}">market: {{ bar.market_status }}</span>
+    <span class="pill {% if bar.live_enabled %}live-on{% else %}live-off{% endif %}">
+      live: {{ 'ON' if bar.live_enabled else 'OFF' }}
+    </span>
+    <button class="icon-btn" onclick="document.getElementById('settingsModal').classList.add('open')">
+      settings{% if bar.unacked_alerts %} ({{ bar.unacked_alerts }}){% endif %}
+    </button>
+  </div>
+</header>

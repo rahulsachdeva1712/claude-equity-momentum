@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Equity Momentum Rebalance</title>
+  <link rel="stylesheet" href="/static/app.css">
+  <script src="https://unpkg.com/htmx.org@1.9.12" integrity="sha384-ujb1lZYygJmzgSwoxRggbCHcjc0rB2XoQrxeTUQyRjrOnlCoYta87iKBWq3EsdM2" crossorigin="anonymous"></script>
+  <script src="https://cdn.plot.ly/plotly-2.30.0.min.js"></script>
+</head>
+<body>
+  {% include "partials/top_bar.html" %}
+
+  <nav class="tabs">
+    <a href="/paper" class="{% if request.url.path == '/paper' %}active{% endif %}">Paper Trading</a>
+    <a href="/live" class="{% if request.url.path == '/live' %}active{% endif %}">Live Trading</a>
+  </nav>
+
+  <main>
+    {% block content %}{% endblock %}
+  </main>
+
+  {% include "partials/settings_modal.html" %}
+</body>
+</html>
