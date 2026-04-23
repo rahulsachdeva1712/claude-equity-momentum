@@ -19,11 +19,14 @@ class StrategyConfig:
     use_mfi_filter: bool = False
     use_cci_filter: bool = False
     use_atr_filter: bool = True
+    use_volume_filter: bool = True
 
     rsi_threshold: float = 75.0
     mfi_threshold: float = 70.0
     cci_threshold: float = 110.0
     atr_pct_max: float = 0.04
+    # FRD A.5: vol_0925_0930 >= 1000 shares (sum of 09:25, 09:26, 09:27, 09:28, 09:29 one-minute candle volumes).
+    intraday_volume_min: float = 1000.0
 
     sort_metric: str = "relative_return_126d"
     weight_metric: str = "relative_return_252d"

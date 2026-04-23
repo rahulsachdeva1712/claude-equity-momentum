@@ -7,11 +7,14 @@ from zoneinfo import ZoneInfo
 IST = ZoneInfo("Asia/Kolkata")
 UTC = ZoneInfo("UTC")
 
-SIGNAL_TIME = time(9, 10)
 EXECUTION_TIME = time(9, 30)
 MARKET_OPEN = time(9, 15)
 MARKET_CLOSE = time(15, 30)
 EOD_CUTOVER = time(15, 35)
+# FRD A.3/A.5: intraday volume gate window — sum of the five one-minute candles
+# starting at 09:25 up to but not including 09:30 (09:25, 09:26, 09:27, 09:28, 09:29).
+VOLUME_WINDOW_START = time(9, 25)
+VOLUME_WINDOW_END = time(9, 30)
 
 
 def now_ist() -> datetime:
@@ -47,9 +50,9 @@ def is_market_hours(dt: datetime | None = None) -> bool:
 def session_date_for(dt: datetime | None = None):
     """The trading session date a given IST timestamp belongs to.
 
-    FRD B.15: signal/exec for date D happens in the morning of date D.
-    Before 09:10 on a weekday we treat as 'next session = today'. On weekends
-    session_date is the last weekday.
+    FRD B.15: signal+execution for date D happens at 09:30 IST on date D.
+    On weekdays we treat any time-of-day as 'session = today'; on weekends
+    session_date falls back to the last weekday.
     """
     dt = (dt or now_ist()).astimezone(IST)
     d = dt.date()

@@ -12,7 +12,6 @@ from app.time_utils import IST
 from app.worker.jobs import (
     execution_job,
     recon_job,
-    signal_job,
     token_expiry_monitor_job,
     token_watcher_job,
 )
@@ -23,10 +22,9 @@ log = logging.getLogger("scheduler")
 def build_scheduler(dhan: DhanClient) -> AsyncIOScheduler:
     scheduler = AsyncIOScheduler(timezone=IST)
 
-    scheduler.add_job(
-        signal_job, CronTrigger(day_of_week="mon-fri", hour=9, minute=10, timezone=IST),
-        args=(dhan,), id="signal", misfire_grace_time=300, coalesce=True,
-    )
+    # FRD B.5: single consolidated signal + execution job at 09:30 IST. The
+    # intraday volume gate (A.5) is a same-session measurement, so there is
+    # no separate pre-market signal step.
     scheduler.add_job(
         execution_job, CronTrigger(day_of_week="mon-fri", hour=9, minute=30, timezone=IST),
         args=(dhan,), id="execution", misfire_grace_time=60, coalesce=True,

@@ -9,7 +9,7 @@ import pytest
 
 from app.strategy.config import StrategyConfig
 from app.strategy.indicators import ema, n_day_return, rsi
-from app.strategy.signals import build_target_set, compute_universe_metrics
+from app.strategy.signals import build_target_set, compute_universe_metrics, static_eligible_symbols
 
 
 def _build_panel(symbol_series: dict[str, np.ndarray], start: date, market_caps: dict[str, float]) -> pd.DataFrame:
@@ -74,7 +74,10 @@ def test_trending_up_stock_gets_selected_over_flat():
     metrics = compute_universe_metrics(panel)
     signal_day = pd.Timestamp(date(2025, 1, 1) + timedelta(days=n - 1))
 
-    ts = build_target_set(metrics, signal_day.date(), capital=1_000_000.0)
+    # Pass the intraday volume gate (FRD A.5) with a value well above the
+    # 1000-share threshold for each symbol.
+    volumes = {"STRONG": 50_000.0, "FLAT": 50_000.0, "SMALLCAP": 50_000.0}
+    ts = build_target_set(metrics, signal_day.date(), capital=1_000_000.0, intraday_volumes=volumes)
     selected = [r.symbol for r in ts.selected()]
     assert "STRONG" in selected
     assert "SMALLCAP" not in selected  # market_cap filter
@@ -92,7 +95,10 @@ def test_weights_sum_to_one_and_qty_fits_capital():
     )
     metrics = compute_universe_metrics(panel)
     d = pd.Timestamp(date(2025, 1, 1) + timedelta(days=n - 1)).date()
-    ts = build_target_set(metrics, d, capital=1_000_000.0)
+    ts = build_target_set(
+        metrics, d, capital=1_000_000.0,
+        intraday_volumes={"A": 50_000.0, "B": 50_000.0},
+    )
     rows = ts.selected()
     assert len(rows) == 2
     assert abs(sum(r.weight for r in rows) - 1.0) < 1e-9
@@ -112,7 +118,10 @@ def test_empty_when_none_eligible():
     )
     metrics = compute_universe_metrics(panel)
     d = pd.Timestamp(date(2025, 1, 1) + timedelta(days=n - 1)).date()
-    ts = build_target_set(metrics, d, capital=1_000_000.0)
+    ts = build_target_set(
+        metrics, d, capital=1_000_000.0,
+        intraday_volumes={"A": 50_000.0, "B": 50_000.0},
+    )
     assert ts.selected() == ()
 
 
@@ -125,5 +134,82 @@ def test_max_positions_cap_respected():
     )
     metrics = compute_universe_metrics(panel)
     d = pd.Timestamp(date(2025, 1, 1) + timedelta(days=n - 1)).date()
-    ts = build_target_set(metrics, d, capital=1_000_000.0, cfg=cfg)
+    ts = build_target_set(
+        metrics, d, capital=1_000_000.0, cfg=cfg,
+        intraday_volumes={s: 50_000.0 for s in syms},
+    )
     assert len(ts.selected()) == cfg.max_positions
+
+
+def test_volume_gate_blocks_illiquid_top_ranker():
+    """FRD A.5, A.6: the volume gate is part of eligibility, so a top-momentum
+    name that fails the 09:25-09:30 volume filter is never in the top-5.
+    The slot is taken by the next volume-qualified name.
+    """
+    n = 300
+    # HI_MOM is the strongest trend; MID_1..MID_5 trail it but are volume-qualified.
+    syms = {"HI_MOM": np.array([100.0 * (1.008 ** k) for k in range(n)])}
+    for i in range(5):
+        syms[f"MID_{i}"] = np.array([100.0 * ((1.005 + i * 0.0001) ** k) for k in range(n)])
+    panel = _build_panel(
+        syms, start=date(2025, 1, 1), market_caps={s: 500.0 for s in syms}
+    )
+    metrics = compute_universe_metrics(panel)
+    d = pd.Timestamp(date(2025, 1, 1) + timedelta(days=n - 1)).date()
+
+    # HI_MOM has only 500 shares traded 09:25-09:30 -> fails the 1000 gate.
+    volumes = {"HI_MOM": 500.0, **{f"MID_{i}": 50_000.0 for i in range(5)}}
+    ts = build_target_set(metrics, d, capital=1_000_000.0, intraday_volumes=volumes)
+    selected = {r.symbol for r in ts.selected()}
+    assert "HI_MOM" not in selected
+    assert selected == {f"MID_{i}" for i in range(5)}
+
+
+def test_volume_gate_fails_closed_when_volume_missing():
+    """FRD A.2, A.5: a symbol with no intraday volume entry fails the gate
+    when the filter is enabled (fail-closed)."""
+    n = 300
+    closes = np.array([100.0 * (1.005 ** k) for k in range(n)])
+    panel = _build_panel(
+        {"A": closes, "B": closes},
+        start=date(2025, 1, 1),
+        market_caps={"A": 500.0, "B": 500.0},
+    )
+    metrics = compute_universe_metrics(panel)
+    d = pd.Timestamp(date(2025, 1, 1) + timedelta(days=n - 1)).date()
+    # Only A has a volume entry; B is absent -> ineligible.
+    ts = build_target_set(metrics, d, capital=1_000_000.0, intraday_volumes={"A": 50_000.0})
+    assert {r.symbol for r in ts.selected()} == {"A"}
+
+
+def test_volume_filter_disabled_via_config_bypasses_gate():
+    """When `use_volume_filter=False`, the intraday_volumes arg is ignored."""
+    cfg = StrategyConfig(use_volume_filter=False)
+    n = 300
+    closes = np.array([100.0 * (1.005 ** k) for k in range(n)])
+    panel = _build_panel(
+        {"A": closes}, start=date(2025, 1, 1), market_caps={"A": 500.0}
+    )
+    metrics = compute_universe_metrics(panel)
+    d = pd.Timestamp(date(2025, 1, 1) + timedelta(days=n - 1)).date()
+    # No volumes supplied at all; gate is off so A still qualifies.
+    ts = build_target_set(metrics, d, capital=1_000_000.0, cfg=cfg, intraday_volumes=None)
+    assert {r.symbol for r in ts.selected()} == {"A"}
+
+
+def test_static_eligible_symbols_excludes_volume_check():
+    """`static_eligible_symbols` returns static-filter survivors regardless
+    of volume data — the trading job uses it to narrow the set of symbols
+    for which intraday volume is fetched."""
+    n = 300
+    closes = np.array([100.0 * (1.005 ** k) for k in range(n)])
+    panel = _build_panel(
+        {"A": closes, "SMALL": closes},
+        start=date(2025, 1, 1),
+        market_caps={"A": 500.0, "SMALL": 10.0},  # SMALL fails market-cap.
+    )
+    metrics = compute_universe_metrics(panel)
+    d = pd.Timestamp(date(2025, 1, 1) + timedelta(days=n - 1)).date()
+    survivors = set(static_eligible_symbols(metrics, d))
+    assert "A" in survivors
+    assert "SMALL" not in survivors

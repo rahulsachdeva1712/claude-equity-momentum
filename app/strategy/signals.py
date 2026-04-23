@@ -88,7 +88,9 @@ def compute_universe_metrics(panel: pd.DataFrame, cfg: StrategyConfig = DEFAULT_
     return per_sym
 
 
-def _eligible_mask(row: pd.Series, cfg: StrategyConfig) -> bool:
+def _static_eligible_mask(row: pd.Series, cfg: StrategyConfig) -> bool:
+    """All eligibility checks that depend only on daily indicators. FRD A.5
+    minus the intraday volume gate."""
     if not np.isfinite(row.get("market_cap_cr", np.nan)):
         return False
     if row["market_cap_cr"] < cfg.market_cap_min_cr:
@@ -113,6 +115,40 @@ def _eligible_mask(row: pd.Series, cfg: StrategyConfig) -> bool:
     return True
 
 
+def _volume_ok(symbol: str, intraday_volumes: dict[str, float] | None, cfg: StrategyConfig) -> bool:
+    """FRD A.5 intraday liquidity gate: `vol_0925_0930 >= cfg.intraday_volume_min`.
+
+    Fails closed: if the filter is enabled and no volume is provided for a
+    symbol, the symbol is ineligible (matches A.2 — missing 09:25–09:29
+    candles disqualify the symbol for that session).
+    """
+    if not cfg.use_volume_filter:
+        return True
+    if intraday_volumes is None:
+        return False
+    v = intraday_volumes.get(symbol)
+    if v is None or not np.isfinite(v):
+        return False
+    return float(v) >= float(cfg.intraday_volume_min)
+
+
+def static_eligible_symbols(
+    metrics: pd.DataFrame,
+    session_date: date,
+    cfg: StrategyConfig = DEFAULT_CONFIG,
+) -> list[str]:
+    """Symbols that pass the static (non-volume) eligibility filters on
+    `session_date`. Used by the trading job to narrow the set of symbols for
+    which intraday 09:25–09:29 candles need to be fetched before the final
+    volume gate is applied.
+    """
+    day = metrics[metrics["date"] == pd.Timestamp(session_date)]
+    if day.empty:
+        return []
+    mask = day.apply(lambda r: _static_eligible_mask(r, cfg), axis=1)
+    return [str(s) for s in day.loc[mask, "symbol"].tolist()]
+
+
 def _target_weights(sort_vals: Iterable[float], weight_vals: Iterable[float]) -> list[float]:
     clipped = [max(0.0, w) for w in weight_vals]
     s = sum(clipped)
@@ -127,19 +163,29 @@ def build_target_set(
     session_date: date,
     capital: float,
     cfg: StrategyConfig = DEFAULT_CONFIG,
+    intraday_volumes: dict[str, float] | None = None,
 ) -> TargetSet:
-    """Run selection + sizing for a given session_date. FRD A.6, A.7.
+    """Run selection + sizing for a given session_date. FRD A.6, A.7, A.10.
 
     `metrics` is the output of compute_universe_metrics. `capital` is the cash
     available to deploy on this rebalance. `session_date` is the date whose
-    completed-day close is used as the reference and execution price. Per A.10,
-    signals are computed at 09:10 on session_date using session_date-1 close.
+    completed-day close is used as the reference and execution price.
+
+    `intraday_volumes` is a dict mapping symbol -> `vol_0925_0930` (summed
+    traded volume across the five one-minute candles ending at 09:30 IST on
+    `session_date`). Required when `cfg.use_volume_filter` is True — a symbol
+    absent from this dict is treated as failing the liquidity gate. Per A.10,
+    the volume filter is part of eligibility, so the top-5 is ranked from the
+    volume-qualified set only.
     """
     day = metrics[metrics["date"] == pd.Timestamp(session_date)]
     if day.empty:
         return TargetSet(session_date=session_date, rows=(), capital=capital)
 
-    eligible = day[day.apply(lambda r: _eligible_mask(r, cfg), axis=1)].copy()
+    def _eligible(row: pd.Series) -> bool:
+        return _static_eligible_mask(row, cfg) and _volume_ok(str(row["symbol"]), intraday_volumes, cfg)
+
+    eligible = day[day.apply(_eligible, axis=1)].copy()
     if eligible.empty:
         return TargetSet(session_date=session_date, rows=(), capital=capital)
 
