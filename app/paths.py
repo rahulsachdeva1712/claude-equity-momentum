@@ -26,6 +26,14 @@ def pid_file(name: str) -> Path:
     return state_dir() / "run" / f"{name}.pid"
 
 
+def lock_file(name: str) -> Path:
+    """Sentinel file used only to hold an exclusive OS lock. Separate from
+    pid_file so the pid file remains freely readable from other processes
+    (Windows uses mandatory locking; locking the pid file directly would
+    block readers with PermissionError)."""
+    return state_dir() / "run" / f"{name}.lock"
+
+
 def log_file(name: str) -> Path:
     return state_dir() / "logs" / f"{name}.log"
 

@@ -65,3 +65,30 @@ def test_corrupt_pid_file_is_cleaned(tmp_state_dir):
 def test_different_names_do_not_conflict(tmp_state_dir):
     with pf.PidFile("worker"), pf.PidFile("web"):
         pass
+
+
+def test_pid_file_readable_while_lock_held(tmp_state_dir):
+    """Regression: on Windows, locking the pid file directly used to make it
+    unreadable from other processes (PermissionError 13). The fix splits the
+    lock onto a separate sentinel file. The pid file must remain freely
+    readable while the lock is held — this is what the web UI relies on to
+    show the worker status pill.
+    """
+    with pf.PidFile("worker"):
+        # Plain Path.read_text from a fresh handle must succeed.
+        text = pid_file("worker").read_text()
+        assert json.loads(text)["pid"] == os.getpid()
+        # check_stale uses the same code path the web UI calls.
+        info = pf.check_stale("worker")
+        assert info.reason == "live process"
+
+
+def test_lock_file_separate_from_pid_file(tmp_state_dir):
+    from app.paths import lock_file as _lock_file
+    with pf.PidFile("worker"):
+        assert pid_file("worker").exists()
+        assert _lock_file("worker").exists()
+        assert pid_file("worker") != _lock_file("worker")
+    # both deleted on release
+    assert not pid_file("worker").exists()
+    assert not _lock_file("worker").exists()

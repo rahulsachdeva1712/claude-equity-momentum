@@ -314,14 +314,21 @@ The `correlationId` prefix `emrb:` is the app's ownership marker. Reconciliation
     worker.log
     web.log
   run/
-    worker.pid                (pid,start_time,cmd)
+    worker.lock               (sentinel; OS exclusive lock holder)
+    worker.pid                (JSON metadata; freely readable)
+    web.lock
     web.pid
     commands/                 (one-shot signals, e.g., `run_rebalance.now`)
   artifacts/
     last_signal_<date>.json   (debug snapshot of each 09:10 job)
 ```
 
-**PID file format.** JSON: `{"pid": 12345, "start_time_epoch": 1712..., "cmd": "worker", "version": "..."}`.
+**PID file format.** JSON: `{"pid": 12345, "start_time_epoch": 1712..., "cmd": "worker"}`.
+The pid file carries metadata only and is written atomically (tempfile +
+rename). The OS exclusive lock is held on the separate `<name>.lock` sentinel
+so other processes can read the pid file at any time without colliding with
+the lock holder. (Required because Windows uses mandatory file locking;
+locking the pid file directly caused PermissionError on read.)
 
 **Startup sequence (both processes).**
 1. Check if PID file exists.
@@ -403,5 +410,6 @@ Mandatory alert sources:
 |---|---|---|
 | 2026-04-22 | Initial Part B added covering paper, live, Dhan integration, scheduler, processes, UI, data model. | Requirements discussion. |
 | 2026-04-22 | Added one-click launchers `run.bat` / `run.sh` and stoppers `stop.bat` / `stop.sh`. First run creates venv, installs deps, seeds `.env`; subsequent runs start worker + web and open the UI. Stoppers send SIGTERM so PID files are cleaned per B.10; forced kills are recovered on next start by the stale-PID cleanup. | User request. |
+| 2026-04-23 | Split PID file into a `<name>.lock` sentinel (holds OS exclusive lock) and a `<name>.pid` data file (JSON, atomically written, freely readable). Fixes Windows PermissionError when the web UI tried to read the worker's pid file while the worker held an `msvcrt.locking()` lock on it. Linux behavior unchanged because `fcntl.flock` is advisory. | Windows runtime bug report. |
 
 Future edits to this FRD must add a row above with the date, the change summary, and the driver.
