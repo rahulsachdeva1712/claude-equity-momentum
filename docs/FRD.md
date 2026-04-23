@@ -1,25 +1,25 @@
 # Equity Momentum Rebalance — Functional Requirements Document
 
 Living document. Source of truth going forward.
-Last updated: 2026-04-22.
+Last updated: 2026-04-23.
 
 This FRD has two parts:
-- **Part A — Strategy Specification.** Preserved verbatim from `Equity_Momentum_App_FRD.docx` (dated 2026-04-22). Describes the trading rules only.
+- **Part A — Strategy Specification.** Originally imported verbatim from `Equity_Momentum_App_FRD.docx` (dated 2026-04-22). Amended in-place since then; see B.16 Change Log for each strategy-rule change and its driver. Describes the trading rules only.
 - **Part B — Application Functional Requirements.** Covers everything the strategy doc intentionally excluded: paper module, live module, Dhan integration, reconciliation, scheduling, UI, processes, persistence, failure handling.
 
 ---
 
 # Part A — Strategy Specification
 
-Equity Momentum Rebalance Strategy. Code-derived strategy document generated from the current repository on 2026-04-22. This document is limited to the strategy itself: universe, inputs, filters, entry rules, exit rules, position sizing, and rebalance criteria. It intentionally avoids broader application, deployment, and backtest-operating details. Timing references are included only where they affect paper and live trading behavior.
+Equity Momentum Rebalance Strategy. Originally code-derived from the repository snapshot on 2026-04-22; subsequently amended to reflect updated strategy rules (see B.16 Change Log). This document is limited to the strategy itself: universe, inputs, filters, entry rules, exit rules, position sizing, and rebalance criteria. It intentionally avoids broader application, deployment, and backtest-operating details. Timing references are included only where they affect paper and live trading behavior.
 
 ## A.1 Strategy Overview
 - Strategy type: long-only daily momentum strategy.
 - Market: BSE equities only.
 - Configured universe: `all_bse_equities`.
 - Portfolio style: concentrated portfolio with a maximum of 5 holdings.
-- Selection approach: eligible stocks are ranked by 6-month relative return and weighted by 12-month relative return.
-- Current execution assumption for paper and live workflow: signal at 09:10 IST, intended trade time at 09:30 IST on the next session.
+- Selection approach: eligible stocks are ranked by 6-month relative return and weighted by 12-month relative return. The volume-liquidity filter (A.5) is applied **before** ranking, so the top-5 is selected from the volume-qualified set only.
+- Current execution assumption for paper and live workflow: a single daily job at 09:30 IST computes the signal using completed D-1 close data plus the 09:25–09:30 intraday volume window, then executes in the same run. There is no separate pre-market signal step.
 
 ## A.2 Universe Definition
 - Universe name in code: `all_bse_equities`.
@@ -27,6 +27,7 @@ Equity Momentum Rebalance Strategy. Code-derived strategy document generated fro
 - A symbol must have daily OHLCV data available to participate.
 - A symbol must have the configured ranking metric and weighting metric available for the signal date to remain eligible.
 - A symbol must have a usable `market_cap_cr` value to pass the active market-cap filter.
+- A symbol must have 09:25–09:30 IST one-minute candle data available on the signal date to evaluate the intraday volume filter.
 
 ## A.3 Strategy Inputs And Derived Metrics
 - Raw data inputs: daily open, high, low, close, volume, symbol, `security_id`, `exchange_segment`, `market_cap_cr`.
@@ -39,6 +40,7 @@ Equity Momentum Rebalance Strategy. Code-derived strategy document generated fro
 - Absolute return metrics: `return_63d`, `return_126d`, `return_252d`.
 - Relative return metrics: `relative_return_63d`, `relative_return_126d`, `relative_return_252d`.
 - Relative return definition: symbol return minus same-day average universe return for the same lookback window.
+- Intraday volume metric `vol_0925_0930`: total traded volume, in shares, over the five one-minute candles ending at 09:30 IST on the signal date (i.e., the sum of the 09:25, 09:26, 09:27, 09:28, and 09:29 candles). Used only as a live-liquidity gate at execution time.
 
 ## A.4 Current Input Parameters
 | Parameter | Current Value |
@@ -68,8 +70,10 @@ Equity Momentum Rebalance Strategy. Code-derived strategy document generated fro
 | Full rebalance | True |
 | Market-cap threshold | 100.0 crore |
 | Breadth threshold | 0.0, therefore breadth gate disabled |
-| Signal generation time | 09:10 IST |
-| Execution time | 09:30 IST |
+| Use intraday volume filter | True |
+| Intraday volume operator and threshold | `vol_0925_0930 >= 1000` shares |
+| Intraday volume window | 09:25–09:30 IST on signal date |
+| Signal generation and execution time | 09:30 IST (single consolidated job) |
 | Execution model | `next_day_open` |
 | Explicit transaction cost | 10 basis points |
 
@@ -79,6 +83,7 @@ Equity Momentum Rebalance Strategy. Code-derived strategy document generated fro
 - Trend filter 2: `EMA(21) > EMA(50)`.
 - Momentum filter: `RSI(14) >= 75`.
 - Volatility filter: `ATR(20) percent <= 4 percent`.
+- Intraday volume filter: `vol_0925_0930 >= 1000` shares. Evaluated at the 09:30 execution job using the live intraday candles for the current session. A symbol failing this gate is treated as ineligible for that session regardless of its ranking.
 - Breadth gate: configured in code but inactive because `breadth_threshold = 0.0`.
 - MFI gate: configured in code but inactive because `use_mfi_filter = False`.
 - CCI gate: configured in code but inactive because `use_cci_filter = False`.
@@ -91,10 +96,11 @@ A stock becomes a long candidate for a signal date only if all of the following 
 - `EMA(21) > EMA(50)`.
 - `RSI(14) >= 75`.
 - `ATR(20) percent <= 4 percent`.
+- `vol_0925_0930 >= 1000` shares on the current session (evaluated at 09:30 IST).
 - The configured sort metric `relative_return_126d` is present.
 - The configured weight metric `relative_return_252d` is present.
 
-After eligibility is established: all eligible names are ranked by `relative_return_126d` in descending order, and only the top 5 names are selected. If fewer than 1 selected name remains, no portfolio is formed for that signal date.
+After eligibility is established — **including the 09:25–09:30 volume gate** — all surviving names are ranked by `relative_return_126d` in descending order, and only the top 5 names are selected. Because the volume gate is part of eligibility rather than a post-selection filter, a symbol that ranks highly on momentum but fails volume is never in the top 5 to begin with; the slot goes to the next volume-qualified name. If fewer than 1 selected name remains, no portfolio is formed for that signal date.
 
 ## A.7 Position Sizing Rules
 - Selected names are weighted using `relative_return_252d`.
@@ -122,9 +128,10 @@ A stock can effectively lose its place in the portfolio because it fails the act
 - If a symbol has no tradable bar on the execution day, the engine skips that entry for that session.
 
 ## A.10 Paper And Live Trading Timing Relevance
-- The strategy prepares the daily signal using completed-day data at 09:10 IST.
-- The strategy is intended to be applied at 09:30 IST for paper and live trading workflows.
-- Paper and live trading therefore consume the same morning target set: what to buy, what to trim, what to hold, and what to exit.
+- The strategy runs once per session, at 09:30 IST, as a single consolidated job.
+- Daily indicators and relative-return metrics are computed from completed D-1 close data.
+- The 09:25–09:30 intraday volume gate is evaluated using the current session's one-minute candles at the moment the job runs.
+- Paper and live trading consume the same 09:30 target set: what to buy, what to trim, what to hold, and what to exit. There is no intermediate 09:10 recommendation step; the entire target set is produced and acted on at 09:30.
 
 ## A.11 Strategy Constraints And Known Limitations
 - The strategy is long-only.
@@ -153,7 +160,7 @@ The application is a single-user desktop-style web app that runs on the user's m
 1. **Paper Trading** — continuously maintained virtual book that mirrors what the live module would have done, using the same signals and execution timing. Always on.
 2. **Live Trading** — places actual CNC delivery orders on Dhan at 09:30 IST per the daily signal. Can be switched off. When off, no live orders are placed; existing live positions are held and tracked only.
 
-Both modules consume the identical 09:10 signal set produced by the strategy engine. There is no backtest UI in the application. Historical data access remains only to compute the indicators and relative-return metrics the strategy needs.
+Both modules consume the identical 09:30 signal set produced by the consolidated strategy + execution job. There is no backtest UI in the application. Historical data access remains only to compute the indicators and relative-return metrics the strategy needs, plus the intraday 09:25–09:30 one-minute candles used by the volume gate.
 
 UI exposes exactly two tabs: **Paper Trading** and **Live Trading**. A persistent top bar provides global status and a settings modal.
 
@@ -190,7 +197,7 @@ Worker and web communicate via SQLite (`settings` table flags polled on a 2-seco
   - `settings` — single-row key/value for kill switch, worker control, UI preferences.
   - `audit_log` — append-only log of every Dhan write (order placement, modify, cancel) with request/response bodies redacted of secrets.
 
-Historical OHLCV is **not** persisted. Each 09:10 run fetches the required lookback window from Dhan historical API and computes indicators in memory. This avoids stale-cache risk.
+Historical OHLCV is **not** persisted. Each 09:30 run fetches the required daily lookback window plus the 09:25–09:29 intraday candles from Dhan and computes indicators and the volume metric in memory. This avoids stale-cache risk.
 
 ## B.4 Authentication and Credentials
 
@@ -207,19 +214,27 @@ Historical OHLCV is **not** persisted. Each 09:10 run fetches the required lookb
 - No pre-baked holiday calendar. Source of truth for "is the market open today" is Dhan's market-status API, queried at each scheduled trigger.
 - APScheduler runs inside the worker with IST timezone.
 - Daily jobs:
-  - **09:10 IST — Signal job.** Query Dhan market-status. If closed, log and exit. Otherwise fetch required OHLCV lookback, compute indicators and relative returns, rank, select up to 5, compute target weights. Write `signals` rows. Emit paper orders to `paper_orders` (buy/trim/exit) derived from diff between current `paper_book` and new targets using last known close for sizing. This is the paper "intent" — fills land at the 09:30 job.
-  - **09:30 IST — Execution job.** Query Dhan market-status. If closed, log and exit. For each paper order, fetch the 09:30 candle close for the symbol from Dhan; record `paper_fills` with full Dhan charge stack; update `paper_book`. If live trading is enabled (kill switch off), for each live order, place a CNC market order on Dhan tagged with `correlation_id`; subscribe to order status; on fill, update `live_fills` and then **adjust the matching `paper_fills` qty to match the actual live fill qty** (the parity rule). On reject, skip the symbol, raise an alert, do not retry.
+  - **09:30 IST — Signal + Execution job (single consolidated run).** Query Dhan market-status. If closed, log and exit. Otherwise:
+    1. Fetch required daily OHLCV lookback and compute indicators, absolute returns, and relative returns from D-1 close data.
+    2. Apply the static eligibility filters from A.5 (market cap, trend, RSI, ATR).
+    3. Fetch the five 09:25–09:29 one-minute candles for each surviving candidate from Dhan, sum traded volume to compute `vol_0925_0930`, and drop any symbol with `vol_0925_0930 < 1000`.
+    4. Rank the remaining volume-qualified set by `relative_return_126d` descending; take the top 5; compute target weights using `relative_return_252d`.
+    5. Write `signals` rows for the session.
+    6. Diff against current `paper_book` to produce paper orders (buy/trim/exit). Fetch the 09:30 one-minute candle close for each traded symbol and record `paper_fills` with the full Dhan charge stack; update `paper_book`.
+    7. If live trading is enabled (kill switch off), for each live order, place a CNC market order on Dhan tagged with `correlation_id`; subscribe to order status; on fill, update `live_fills` and **adjust the matching `paper_fills` qty to match the actual live fill qty** (the parity rule). On reject, skip the symbol, raise an alert, do not retry.
+
+  The 09:10 pre-market signal job no longer exists. All signal computation happens inside this 09:30 job because the intraday volume gate is a same-session measurement; there is no stable, pre-market form of the target set to surface.
 - Live reconciliation loop: every 15 seconds during market hours (09:15–15:30 IST), the worker pulls Dhan positions and order book, filters to our `correlation_id` tags, updates `live_positions_snapshot` and `live_pnl_daily`. Outside market hours the loop is idle.
 - Token expiry watcher: every 60 seconds, re-parse `exp`, raise alerts at the 60-min and 10-min thresholds, disable live trading if expired.
-- Catch-up behavior: if the worker is not running at 09:10 or 09:30, those jobs do not run retroactively. On next start, UI shows "Missed today's signal/execution" alert. No auto-catch-up, because mid-day fills would diverge from the specified 09:30-close price.
+- Catch-up behavior: if the worker is not running at 09:30, the job does not run retroactively. On next start, UI shows "Missed today's execution" alert. No auto-catch-up, because both the intraday volume window and the specified 09:30-close fill price are session-time artifacts that cannot be reconstructed later.
 
 ## B.6 Paper Trading Module
 
 **Purpose.** Always-on virtual book that applies the strategy identically to live, with two goals: (a) operate when live is switched off, (b) serve as the "shadow" book whose numbers match live within rounding when live is on.
 
-**Inputs.** Daily signal set from the 09:10 job; Dhan historical / 1-minute candle API for the 09:30 candle close.
+**Inputs.** Daily signal set from the consolidated 09:30 job (same job that produces paper fills in the same run); Dhan historical / 1-minute candle API for the 09:25–09:29 volume candles and the 09:30 fill candle.
 
-**Fill rule.** Every paper order fills at the **close of the 09:30 minute candle** for the corresponding symbol. If Dhan returns no 09:30 candle for a symbol (halt, no trade), that symbol is skipped for that session and an alert is raised — matching the strategy's "no tradable bar" rule in A.9.
+**Fill rule.** Every paper order fills at the **close of the 09:30 minute candle** for the corresponding symbol. If Dhan returns no 09:30 candle for a symbol (halt, no trade), that symbol is skipped for that session and an alert is raised — matching the strategy's "no tradable bar" rule in A.9. Note that a symbol cleared the 09:25–09:30 volume gate in A.5 before ever producing a paper order, so a missing 09:30 candle at fill time is the only "no tradable bar" case remaining.
 
 **Charges.** Paper fills apply the full Dhan charge stack for CNC delivery:
 - Brokerage (Dhan's publicly posted CNC rate — currently zero for delivery, but computed via a pluggable function so a future change does not require a code change).
@@ -254,7 +269,7 @@ The `correlationId` prefix `emrb:` is the app's ownership marker. Reconciliation
 
 **Order statuses tracked.** PENDING, TRANSIT, OPEN, TRADED, REJECTED, CANCELLED. Worker polls order status for each outgoing order until terminal (TRADED/REJECTED/CANCELLED) or until 15:30 IST.
 
-**Rejects.** If Dhan rejects an order, the worker logs the reject reason, raises an alert with symbol + reason, and **does not retry**. The matching paper fill also does not happen for that symbol that session (parity). The symbol is effectively absent from the portfolio for that session; the next 09:10 signal decides the next action.
+**Rejects.** If Dhan rejects an order, the worker logs the reject reason, raises an alert with symbol + reason, and **does not retry**. The matching paper fill also does not happen for that symbol that session (parity). The symbol is effectively absent from the portfolio for that session; the next session's 09:30 job decides the next action.
 
 **Partial fills.** If `filledQty < orderedQty` at terminal state, `live_fills` record uses `filledQty`. The matching `paper_fills` is adjusted to `filledQty`. No retry for the residual.
 
@@ -281,7 +296,7 @@ The `correlationId` prefix `emrb:` is the app's ownership marker. Reconciliation
 **Framework.** FastAPI + Jinja2 templates + HTMX for partial updates + Plotly (via CDN) for the two charts. Bootstrap for layout. No build step. No SPA.
 
 **Tabs (exactly two).**
-1. **Paper Trading** — mirrors the mockup: Today's summary cards, Signals For Today, Today Status, Daily Paper P&L chart, Cumulative Paper P&L chart, Performance Summary, Current Paper Book, Trade log.
+1. **Paper Trading** — mirrors the mockup: Today's summary cards, Signals For Today, Today Status, Daily Paper P&L chart, Cumulative Paper P&L chart, Performance Summary, Current Paper Book, Trade log. "Signals For Today" is empty/"Pending 09:30 run" until the 09:30 job completes; there is no pre-market recommendation list because the volume gate is a 09:30 measurement.
 2. **Live Trading** — same visual structure as Paper, but numbers come from the reconciled live dataset. When `live_enabled = false`, the tab shows all historical tagged live activity (if any) plus a prominent banner: "Live trading is OFF. Showing held positions only."
 
 **Top bar (persistent, above tabs).**
@@ -320,7 +335,7 @@ The `correlationId` prefix `emrb:` is the app's ownership marker. Reconciliation
     web.pid
     commands/                 (one-shot signals, e.g., `run_rebalance.now`)
   artifacts/
-    last_signal_<date>.json   (debug snapshot of each 09:10 job)
+    last_signal_<date>.json   (debug snapshot of each 09:30 job)
 ```
 
 **PID file format.** JSON: `{"pid": 12345, "start_time_epoch": 1712..., "cmd": "worker"}`.
@@ -382,7 +397,7 @@ Mandatory alert sources:
 - **Reliability:** the two-process topology plus SQLite WAL means a UI crash never affects trading, and a worker crash fails fast and surfaces in UI within 5 seconds. No silent failures.
 - **Security:** `.env` file permissions forced to 0600 on startup. Secrets never logged. No telemetry leaves the machine.
 - **Portability:** Linux and Windows support. Time zone is pinned to Asia/Kolkata inside the scheduler regardless of system locale.
-- **Idempotency:** the 09:10 job is idempotent — re-running it for the same session date overwrites `signals` and regenerates `paper_orders` for unfilled items. The 09:30 job is **not** idempotent once live orders are sent; a guard prevents re-run by checking a `sessions.execution_completed` flag.
+- **Idempotency:** the consolidated 09:30 job is **not** idempotent once live orders are sent or paper fills are written; a guard prevents re-run by checking a `sessions.execution_completed` flag. A manual "rerun" command from `run/commands/` is rejected with an alert after this flag is set for the session date.
 - **Test coverage target:** golden tests for strategy signal outputs against a fixed dataset; unit tests for charges computation, recon filter, PID file lifecycle; integration test for paper parity with a mocked Dhan client. No tests hit real Dhan.
 
 ## B.14 Out of Scope
@@ -401,7 +416,8 @@ Mandatory alert sources:
 - **Brokerage schedule.** Assumes Dhan CNC brokerage is zero as of the FRD date. The `charges.py` function is pluggable; if Dhan changes this, update the function and document in the change log below.
 - **BSE exchange codes in Dhan.** Assumed `exchange_segment = BSE_EQ` for placing and pulling orders/positions. To be verified in the client implementation.
 - **1-minute candle availability for 09:30.** Assumes Dhan historical API can return the 09:30 minute candle close for BSE equities within a few minutes after close. If not, fallback is to the 09:30 LTP snapshot polled at `09:30:59`.
-- **Session-date definition.** For a signal generated on date `D` at 09:10 using `D-1` close data, the session date is `D` across all tables. All timestamps stored in UTC; displayed in IST.
+- **09:25–09:29 candle availability at 09:30.** Assumes the five one-minute candles ending at 09:30 (the 09:25, 09:26, 09:27, 09:28, and 09:29 candles) are retrievable from Dhan intraday data at or shortly after 09:30:00 IST for every universe symbol. If a symbol has missing candles across this window, `vol_0925_0930` is treated as 0 and the symbol fails the volume gate. The 60-second latency budget in B.13 accommodates this fetch before live order placement.
+- **Session-date definition.** For a signal generated on date `D` at 09:30 using `D-1` close data and `D` 09:25–09:29 intraday candles, the session date is `D` across all tables. All timestamps stored in UTC; displayed in IST.
 - **Clock sync.** Assumes host clock is within 2 seconds of true IST. No NTP enforcement in-app.
 
 ## B.16 Change Log
@@ -412,5 +428,6 @@ Mandatory alert sources:
 | 2026-04-22 | Added one-click launchers `run.bat` / `run.sh` and stoppers `stop.bat` / `stop.sh`. First run creates venv, installs deps, seeds `.env`; subsequent runs start worker + web and open the UI. Stoppers send SIGTERM so PID files are cleaned per B.10; forced kills are recovered on next start by the stale-PID cleanup. | User request. |
 | 2026-04-23 | Split PID file into a `<name>.lock` sentinel (holds OS exclusive lock) and a `<name>.pid` data file (JSON, atomically written, freely readable). Fixes Windows PermissionError when the web UI tried to read the worker's pid file while the worker held an `msvcrt.locking()` lock on it. Linux behavior unchanged because `fcntl.flock` is advisory. | Windows runtime bug report. |
 | 2026-04-23 | `.env` now read with `utf-8-sig` so a UTF-8 BOM (added by Notepad on Windows) is stripped instead of fusing into the first key name. Top-bar token classifier now distinguishes "missing" vs "invalid" vs "expiring" vs "valid"; the invalid label includes a hint about BOM/quotes. | Windows runtime bug: token entered into `.env` was reported as "no token" by the UI. |
+| 2026-04-23 | Added an intraday liquidity filter: `vol_0925_0930 >= 1000` shares, measured as the sum of traded volume across the 09:25, 09:26, 09:27, 09:28, and 09:29 one-minute candles on the signal date (A.3, A.4, A.5, A.6). The volume gate is part of eligibility, so the top-5 is ranked from the volume-qualified set only. Dropped the separate 09:10 pre-market signal job; signal computation and execution are now a single consolidated 09:30 IST job (A.1, A.10, B.5, B.6, B.9, B.13). Catch-up rule simplified to a single "missed 09:30 execution" alert, and idempotency tightened to one `sessions.execution_completed` guard. | User requirement: liquidity guarantee at trade time; consequent removal of the pre-market recommendation view. |
 
 Future edits to this FRD must add a row above with the date, the change summary, and the driver.
