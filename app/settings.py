@@ -48,7 +48,9 @@ class Settings(BaseSettings):
     dhan_access_token: str = Field(default="")
 
     web_host: str = Field(default="127.0.0.1", alias="EMRB_WEB_HOST")
-    web_port: int = Field(default=8765, alias="EMRB_WEB_PORT")
+    # 18765 was chosen to avoid the common 8765 (used by JupyterLab, older
+    # Dash defaults, etc.). Override via EMRB_WEB_PORT in .env if needed.
+    web_port: int = Field(default=18765, alias="EMRB_WEB_PORT")
     log_level: str = Field(default="INFO", alias="EMRB_LOG_LEVEL")
     timezone: str = Field(default="Asia/Kolkata", alias="EMRB_TIMEZONE")
 
