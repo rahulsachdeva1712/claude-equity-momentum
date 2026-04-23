@@ -26,7 +26,11 @@ from app.paper.engine import (
 )
 from app.paths import artifact_file, env_file
 from app.strategy.config import DEFAULT_CONFIG
-from app.strategy.signals import build_target_set, compute_universe_metrics
+from app.strategy.signals import (
+    build_target_set,
+    compute_universe_metrics,
+    static_eligible_symbols,
+)
 from app.strategy.universe import UniverseEntry, UniverseProvider, default_provider
 from app.time_utils import now_ist, session_date_for
 
@@ -74,16 +78,42 @@ async def _market_is_open(dhan: DhanClient, conn: sqlite3.Connection) -> bool:
     return True
 
 
-async def signal_job(
+async def execution_job(
     dhan: DhanClient,
     provider: UniverseProvider | None = None,
     capital_override: float | None = None,
 ) -> None:
-    """09:10 IST: compute signal set and stage paper orders. FRD A.6, A.7, B.5."""
+    """09:30 IST — single consolidated signal + execution job. FRD B.5.
+
+    Steps (mirror FRD B.5 numbered list):
+    1. Market-status check.
+    2. Fetch daily OHLCV lookback, compute indicators and relative returns.
+    3. Narrow to static-eligibility survivors; fetch 09:25-09:29 intraday
+       candles for those symbols; compute vol_0925_0930 and apply the volume
+       gate.
+    4. Rank the volume-qualified set by relative_return_126d, take top 5,
+       build target weights and cash-aware target quantities.
+    5. Persist `signals` rows and generate paper orders via diff against
+       current paper_book.
+    6. Fetch 09:30 minute-candle close; fill paper orders; if live enabled,
+       place tagged Dhan orders and propagate actual fill qty back to paper
+       (parity rule).
+    7. Mark sessions.execution_completed_at to block re-runs (FRD B.13).
+    """
     provider = provider or default_provider()
     conn = connect()
     try:
         if not await _market_is_open(dhan, conn):
+            return
+
+        sess = session_date_for(now_ist())
+        # Idempotency guard (FRD B.13): the consolidated job is non-idempotent
+        # once live orders or paper fills have been written.
+        done = conn.execute(
+            "SELECT execution_completed_at FROM sessions WHERE session_date = ?", (sess.isoformat(),)
+        ).fetchone()
+        if done and done["execution_completed_at"]:
+            log.info("execution already completed for %s; skipping", sess)
             return
 
         universe = provider.load()
@@ -91,7 +121,7 @@ async def signal_job(
             raise_alert(conn, Alert(severity="warn", source="jobs", message="empty universe; skip"))
             return
 
-        sess = session_date_for(now_ist())
+        # Step 2: daily indicators.
         from_date = (sess - timedelta(days=400)).isoformat()
         to_date = sess.isoformat()
 
@@ -111,9 +141,16 @@ async def signal_job(
             return
 
         metrics = compute_universe_metrics(panel, DEFAULT_CONFIG)
-        capital = capital_override if capital_override is not None else _capital_for(conn)
-        target = build_target_set(metrics, sess, capital=capital)
 
+        # Step 3: volume gate. Only fetch intraday candles for static-eligibility survivors.
+        static_survivors = set(static_eligible_symbols(metrics, sess, DEFAULT_CONFIG))
+        intraday_volumes = await _fetch_0925_0930_volumes(dhan, universe, sess, static_survivors)
+
+        # Step 4: build target set (applies static filters + volume gate + ranking + sizing).
+        capital = capital_override if capital_override is not None else _capital_for(conn)
+        target = build_target_set(metrics, sess, capital=capital, intraday_volumes=intraday_volumes)
+
+        # Step 5: persist signals and generate paper orders.
         with tx(conn):
             conn.execute("DELETE FROM signals WHERE session_date = ?", (sess.isoformat(),))
             for r in target.rows:
@@ -135,17 +172,13 @@ async def signal_job(
                     ),
                 )
             conn.execute(
-                "INSERT INTO sessions (session_date, signal_completed_at, market_open)"
-                " VALUES (?, ?, 1)"
-                " ON CONFLICT(session_date) DO UPDATE SET"
-                " signal_completed_at=excluded.signal_completed_at, market_open=1",
-                (sess.isoformat(), now_ist().isoformat()),
+                "INSERT INTO sessions (session_date, market_open) VALUES (?, 1)"
+                " ON CONFLICT(session_date) DO UPDATE SET market_open=1",
+                (sess.isoformat(),),
             )
-
-        # Stage paper orders (09:10 side of FRD B.5)
         paper_generate(conn, sess)
 
-        # Debug artifact (FRD B.10)
+        # Debug artifact (FRD B.10).
         with artifact_file(f"last_signal_{sess.isoformat()}.json").open("w") as f:
             json.dump(
                 {
@@ -160,33 +193,14 @@ async def signal_job(
                         }
                         for r in target.rows
                     ],
+                    "intraday_volumes": intraday_volumes,
                     "computed_at": now_ist().isoformat(),
                 },
                 f,
                 indent=2,
             )
-    finally:
-        conn.close()
 
-
-async def execution_job(dhan: DhanClient) -> None:
-    """09:30 IST: fill paper orders at 09:30 close; if live enabled, place
-    tagged Dhan orders and have paper honor the actual live qty.
-    """
-    conn = connect()
-    try:
-        if not await _market_is_open(dhan, conn):
-            return
-
-        sess = session_date_for(now_ist())
-        # Guard: do not re-run after completion (FRD B.13 idempotency rule)
-        done = conn.execute(
-            "SELECT execution_completed_at FROM sessions WHERE session_date = ?", (sess.isoformat(),)
-        ).fetchone()
-        if done and done["execution_completed_at"]:
-            log.info("execution already completed for %s; skipping", sess)
-            return
-
+        # Step 6: fill paper + place live orders.
         paper_rows = conn.execute(
             "SELECT po.id, po.symbol, po.action, po.order_qty, s.security_id, s.exchange_segment"
             " FROM paper_orders po LEFT JOIN signals s ON s.session_date = po.session_date AND s.symbol = po.symbol"
@@ -203,14 +217,13 @@ async def execution_job(dhan: DhanClient) -> None:
             placeable = [t for t in tuples if t[4]]
             overrides = await place_orders(conn, dhan, sess, placeable)
 
-        # Pre-fetch 09:30 close for each symbol before calling the sync paper engine.
         prices = await _fetch_0930_closes(dhan, conn, sess, [t[1] for t in tuples])
         price_fetcher = lambda sym, _prices=prices: _prices.get(sym)
         paper_execute(conn, sess, price_fetcher, qty_override=overrides)
 
-        # Use the same snapshot for end-of-execution MTM.
         compute_paper_pnl(conn, sess, ltp_fetcher=price_fetcher)
 
+        # Step 7: mark completed.
         with tx(conn):
             conn.execute(
                 "UPDATE sessions SET execution_completed_at = ? WHERE session_date = ?",
@@ -300,6 +313,40 @@ def _capital_for(conn: sqlite3.Connection) -> float:
         except (TypeError, ValueError):
             return 100_000.0
     return 100_000.0
+
+
+async def _fetch_0925_0930_volumes(
+    dhan: DhanClient,
+    universe: list[UniverseEntry],
+    sess: date,
+    symbols: set[str],
+) -> dict[str, float]:
+    """Sum traded volume across the five one-minute candles starting at 09:25
+    and ending before 09:30 (09:25, 09:26, 09:27, 09:28, 09:29) for each
+    symbol in `symbols`. FRD A.3, A.5.
+
+    Returns {symbol: volume}. Symbols with missing or failed candle fetches
+    are left out, which fail-closes the volume gate in `_volume_ok`.
+    """
+    out: dict[str, float] = {}
+    if not symbols:
+        return out
+    by_name = {u.symbol: u for u in universe}
+    from_iso = f"{sess.isoformat()}T09:25:00"
+    to_iso = f"{sess.isoformat()}T09:30:00"
+    for sym in symbols:
+        u = by_name.get(sym)
+        if u is None:
+            continue
+        try:
+            bars = await dhan.intraday(u.security_id, u.exchange_segment, 1, from_iso, to_iso)
+        except DhanUnavailable as e:
+            log.warning("intraday volume fetch failed for %s: %s", sym, e)
+            continue
+        if not bars:
+            continue
+        out[sym] = float(sum(b.volume for b in bars))
+    return out
 
 
 async def _fetch_0930_closes(

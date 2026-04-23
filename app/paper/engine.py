@@ -77,7 +77,7 @@ def generate_orders(conn: sqlite3.Connection, session_date: date) -> list[PaperO
     orders: list[PaperOrder] = []
     with tx(conn):
         # Clear any previous PENDING orders for this session (idempotency for
-        # the 09:10 job per FRD B.13).
+        # the 09:30 consolidated job per FRD B.13).
         conn.execute(
             "DELETE FROM paper_orders WHERE session_date = ? AND status = 'PENDING'",
             (session_date.isoformat(),),

@@ -31,7 +31,6 @@ CREATE TABLE IF NOT EXISTS settings (
 
 CREATE TABLE IF NOT EXISTS sessions (
     session_date TEXT PRIMARY KEY,
-    signal_completed_at TEXT,
     execution_completed_at TEXT,
     market_open INTEGER
 );
