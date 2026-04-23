@@ -11,6 +11,7 @@ from app.dhan.client import DhanClient
 from app.time_utils import IST
 from app.worker.jobs import (
     execution_job,
+    poll_market_status_job,
     recon_job,
     signal_job,
     token_expiry_monitor_job,
@@ -36,6 +37,12 @@ def build_scheduler(dhan: DhanClient) -> AsyncIOScheduler:
     scheduler.add_job(
         recon_job, CronTrigger(day_of_week="mon-fri", hour="9-15", minute="*", second="*/15", timezone=IST),
         args=(dhan,), id="recon", misfire_grace_time=10, coalesce=True, max_instances=1,
+    )
+    # Poll market status once a minute every day. Cheap (single GET), and it
+    # keeps the UI top-bar "market:" pill fresh even outside market hours.
+    scheduler.add_job(
+        poll_market_status_job, CronTrigger(minute="*", timezone=IST),
+        args=(dhan,), id="market_status", coalesce=True, max_instances=1,
     )
 
     tok_state: dict = {}

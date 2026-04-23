@@ -119,6 +119,27 @@ def alerts_unacked(conn: sqlite3.Connection, limit: int = 20) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def market_status_label(conn: sqlite3.Connection) -> str:
+    """Read the most recent market_status the worker wrote. "unknown" if the
+    worker hasn't polled yet (no row) or the row is stale (> 5 minutes)."""
+    from datetime import datetime, timedelta, timezone
+
+    row = conn.execute(
+        "SELECT value, updated_at FROM settings WHERE key = 'market_status'"
+    ).fetchone()
+    if not row:
+        return "unknown"
+    try:
+        # stored ISO timestamps are IST-aware
+        updated = datetime.fromisoformat(row["updated_at"])
+        age = datetime.now(updated.tzinfo or timezone.utc) - updated
+    except (TypeError, ValueError):
+        return row["value"].lower()
+    if age > timedelta(minutes=5):
+        return f"{row['value'].lower()} (stale)"
+    return row["value"].lower()
+
+
 def top_bar_status(conn: sqlite3.Connection, token: str, worker_pid_alive: bool, live_enabled: bool, market_status: str | None) -> dict:
     token_state, token_label = _classify_token(token)
     return {

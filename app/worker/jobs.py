@@ -58,13 +58,50 @@ def _bars_to_panel(bars_by_symbol: dict[str, list[OHLCBar]], universe: list[Univ
     return pd.DataFrame(rows)
 
 
+MARKET_STATUS_KEY = "market_status"
+MARKET_STATUS_TS_KEY = "market_status_ts"
+
+
+def _write_market_status(conn: sqlite3.Connection, status: str) -> None:
+    ts = now_ist().isoformat()
+    with tx(conn):
+        for k, v in ((MARKET_STATUS_KEY, status), (MARKET_STATUS_TS_KEY, ts)):
+            conn.execute(
+                "INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)"
+                " ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+                (k, v, ts),
+            )
+
+
+async def poll_market_status_job(dhan: DhanClient) -> None:
+    """Refresh the market-status settings row. FRD B.5 display requirement.
+
+    Runs on its own schedule (cheap API call) so the UI top bar always has
+    something recent to display, independent of the 09:10 / 09:30 jobs.
+    """
+    conn = connect()
+    try:
+        try:
+            status = await dhan.market_status()
+            _write_market_status(conn, status or "UNKNOWN")
+        except DhanUnavailable:
+            _write_market_status(conn, "UNAVAILABLE")
+        except Exception as e:  # noqa: BLE001
+            log.warning("market_status poll failed: %s", e)
+            _write_market_status(conn, "UNAVAILABLE")
+    finally:
+        conn.close()
+
+
 async def _market_is_open(dhan: DhanClient, conn: sqlite3.Connection) -> bool:
     """FRD B.5: query Dhan at trigger time, alert + skip if closed."""
     try:
         status = await dhan.market_status()
     except DhanUnavailable as e:
         raise_alert(conn, Alert(severity="warn", source="jobs", message=f"market_status unavailable: {e}"))
+        _write_market_status(conn, "UNAVAILABLE")
         return False
+    _write_market_status(conn, status or "UNKNOWN")
     if status != "OPEN":
         raise_alert(
             conn,

@@ -48,7 +48,7 @@ def _context(request: Request) -> dict:
             token=settings.dhan_access_token,
             worker_pid_alive=_worker_alive(),
             live_enabled=live_on,
-            market_status=None,
+            market_status=views.market_status_label(conn),
         )
         return {
             "request": request,
@@ -125,6 +125,48 @@ def create_app() -> FastAPI:
         finally:
             conn.close()
         return RedirectResponse(url="/paper", status_code=303)
+
+    @app.get("/debug/env")
+    async def debug_env():
+        """Diagnostic: describe the .env the app actually read, without leaking
+        secret values. Safe because the app binds to 127.0.0.1 only.
+        """
+        from app.dhan.client import jwt_seconds_to_expiry
+
+        settings = load_settings()
+        p = env_file()
+        info: dict = {
+            "env_file_path": str(p),
+            "env_file_exists": p.exists(),
+        }
+        if p.exists():
+            raw = p.read_bytes()
+            info["env_file_bytes"] = len(raw)
+            info["has_utf8_bom"] = raw.startswith(b"\xef\xbb\xbf")
+            info["has_utf16_bom"] = raw.startswith(b"\xff\xfe") or raw.startswith(b"\xfe\xff")
+            info["line_endings"] = "CRLF" if b"\r\n" in raw else ("LF" if b"\n" in raw else "none")
+            try:
+                text = raw.decode("utf-8-sig")
+                info["keys_detected"] = sorted(
+                    line.split("=", 1)[0].strip()
+                    for line in text.splitlines()
+                    if "=" in line and not line.lstrip().startswith("#")
+                )
+            except UnicodeDecodeError as e:
+                info["decode_error"] = str(e)
+
+        token = settings.dhan_access_token
+        info["dhan_client_id_present"] = bool(settings.dhan_client_id)
+        info["dhan_access_token_present"] = bool(token)
+        info["dhan_access_token_length"] = len(token)
+        if token:
+            info["dhan_access_token_preview"] = f"{token[:4]}...{token[-4:]}"
+            info["starts_with_eyJ"] = token.startswith("eyJ")
+            info["has_quotes"] = token.startswith(('"', "'")) or token.endswith(('"', "'"))
+            info["has_leading_ws"] = token != token.lstrip()
+            info["has_trailing_ws"] = token != token.rstrip()
+            info["jwt_seconds_to_expiry"] = jwt_seconds_to_expiry(token)
+        return info
 
     @app.post("/alerts/{alert_id}/ack")
     async def ack(alert_id: int):

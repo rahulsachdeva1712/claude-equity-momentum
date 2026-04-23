@@ -69,16 +69,35 @@ def _read_pid_file(path: Path) -> Optional[dict]:
         return {"pid": None, "cmd": None, "start_time_epoch": None, "_corrupt": True}
 
 
-def _process_matches(pid: int, expected_cmd: str) -> bool:
-    """True if pid is alive and its recorded command matches expected.
-    The cmd check stops us from treating a recycled PID as our own process.
+def _process_matches(pid: int, expected_cmd: str, expected_start_epoch: int | None = None) -> bool:
+    """True if pid is alive and represents the same instance we recorded.
+
+    Authority order:
+    1. Kernel-reported create_time (if we have it) — can't collide, so a PID
+       recycle shows up as a mismatch here and is rejected immediately.
+    2. Same-process shortcut — only valid *after* the start-time check.
+    3. cmdline substring match for cross-process same-cmd detection.
+
+    Rationale: relying on cmdline substring alone was fooled by PID recycle
+    into an unrelated process whose cmdline also happened to contain the
+    expected substring.
     """
-    if pid == os.getpid():
-        return True
     try:
         p = psutil.Process(pid)
     except (psutil.NoSuchProcess, psutil.AccessDenied):
         return False
+
+    if expected_start_epoch is not None:
+        try:
+            actual = p.create_time()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            return False
+        if abs(actual - expected_start_epoch) > 10:
+            return False  # PID recycled — different process.
+
+    if pid == os.getpid():
+        return True
+
     try:
         cmdline = " ".join(p.cmdline())
     except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
@@ -106,9 +125,10 @@ def check_stale(name: str) -> StaleInfo:
 
     pid = data.get("pid")
     cmd = data.get("cmd") or name
+    start = data.get("start_time_epoch")
     if pid is None:
         return StaleInfo(cleaned=False, previous_pid=None, reason="missing pid field")
-    if _process_matches(pid, cmd):
+    if _process_matches(pid, cmd, expected_start_epoch=start if isinstance(start, (int, float)) else None):
         return StaleInfo(cleaned=False, previous_pid=pid, reason="live process")
     return StaleInfo(cleaned=False, previous_pid=pid, reason="dead or wrong cmd")
 
@@ -188,9 +208,13 @@ class PidFile:
             raise AlreadyRunning(self.name, -1) from e
         self._lock_fd = fd
 
+        try:
+            start_epoch = int(psutil.Process(os.getpid()).create_time())
+        except Exception:  # noqa: BLE001 — fall back to wallclock
+            start_epoch = int(time.time())
         record = {
             "pid": os.getpid(),
-            "start_time_epoch": int(time.time()),
+            "start_time_epoch": start_epoch,
             "cmd": self.name,
         }
         _atomic_write_text(self.path, json.dumps(record))

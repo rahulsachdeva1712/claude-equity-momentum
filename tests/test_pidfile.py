@@ -92,3 +92,22 @@ def test_lock_file_separate_from_pid_file(tmp_state_dir):
     # both deleted on release
     assert not pid_file("worker").exists()
     assert not _lock_file("worker").exists()
+
+
+def test_pid_recycled_with_matching_cmd_is_treated_as_stale(tmp_state_dir):
+    """If a prior pidfile records pid=P and start_time=T, but the OS has
+    since handed P to an unrelated process that happens to have 'worker'
+    somewhere in its cmdline, we must not treat it as live. The cross-check
+    against the process's kernel create_time rules it out."""
+    import psutil
+
+    me = psutil.Process(os.getpid())
+    path = pid_file("worker")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # Claim our own PID but fake an ancient start time.
+    path.write_text(
+        json.dumps({"pid": os.getpid(), "cmd": "worker", "start_time_epoch": int(me.create_time()) - 3600})
+    )
+    info = pf.check_stale("worker")
+    assert info.reason == "dead or wrong cmd"  # i.e., not "live process"
+    assert info.previous_pid == os.getpid()
