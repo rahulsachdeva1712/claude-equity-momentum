@@ -120,22 +120,7 @@ def alerts_unacked(conn: sqlite3.Connection, limit: int = 20) -> list[dict]:
 
 
 def top_bar_status(conn: sqlite3.Connection, token: str, worker_pid_alive: bool, live_enabled: bool, market_status: str | None) -> dict:
-    secs = jwt_seconds_to_expiry(token) if token else None
-    if secs is None:
-        token_state = "missing"
-        token_label = "no token"
-    elif secs <= 0:
-        token_state = "expired"
-        token_label = "expired"
-    elif secs <= 3600:
-        token_state = "expiring"
-        token_label = f"expires in {secs // 60} min"
-    else:
-        token_state = "valid"
-        h = secs // 3600
-        m = (secs % 3600) // 60
-        token_label = f"valid, expires in {h}h {m}m"
-
+    token_state, token_label = _classify_token(token)
     return {
         "worker_alive": worker_pid_alive,
         "token_state": token_state,
@@ -144,3 +129,21 @@ def top_bar_status(conn: sqlite3.Connection, token: str, worker_pid_alive: bool,
         "market_status": market_status or "unknown",
         "unacked_alerts": len(alerts_unacked(conn)),
     }
+
+
+def _classify_token(token: str) -> tuple[str, str]:
+    if not token:
+        return "missing", "no token"
+    secs = jwt_seconds_to_expiry(token)
+    if secs is None:
+        # Token is set but doesn't parse as JWT. Most common cause on Windows
+        # is a UTF-8 BOM in .env from Notepad fusing into the variable name,
+        # or the value being wrapped in quotes / extra whitespace.
+        return "invalid", "token unparseable (check .env for BOM/quotes)"
+    if secs <= 0:
+        return "expired", "expired"
+    if secs <= 3600:
+        return "expiring", f"expires in {secs // 60} min"
+    h = secs // 3600
+    m = (secs % 3600) // 60
+    return "valid", f"valid, expires in {h}h {m}m"

@@ -11,8 +11,8 @@ body { margin:0; font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-
 .top-bar .pills { display:flex; gap:8px; align-items:center; }
 .pill { padding: 3px 8px; border-radius: 999px; background:#f3f4f6; font-size:12px; }
 .pill.ok, .pill.live-on, .pill.token-valid, .pill.market-open { background:#ecfdf5; color:var(--ok); }
-.pill.bad, .pill.live-off, .pill.token-expired, .pill.market-closed { background:#fef2f2; color:var(--bad); }
-.pill.token-expiring, .pill.market-unknown { background:#fff7ed; color:var(--warn); }
+.pill.bad, .pill.live-off, .pill.token-expired, .pill.token-invalid, .pill.market-closed { background:#fef2f2; color:var(--bad); }
+.pill.token-expiring, .pill.token-missing, .pill.market-unknown { background:#fff7ed; color:var(--warn); }
 
 .icon-btn, .btn { cursor:pointer; padding: 4px 10px; border-radius: 6px;
                   border: 1px solid var(--border); background: var(--card); font-size: 12px; }

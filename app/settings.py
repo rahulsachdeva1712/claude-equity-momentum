@@ -1,6 +1,7 @@
 """Runtime settings. FRD B.4."""
 from __future__ import annotations
 
+import io
 import os
 from pathlib import Path
 
@@ -14,14 +15,27 @@ from app.paths import env_file
 def _load_env_file() -> None:
     """Load ~/.claude-equity-momentum/.env if present. No-op otherwise.
     Called at import time; worker also watches this file for hot reload.
+
+    The file is decoded as utf-8-sig so a Windows BOM (added by Notepad
+    when the user pastes the access token) is stripped instead of being
+    fused into the first key name. Without this, DHAN_ACCESS_TOKEN ends
+    up in os.environ as '﻿DHAN_ACCESS_TOKEN' and Settings sees the
+    field as empty.
     """
     p: Path = env_file()
-    if p.exists():
-        load_dotenv(p, override=True)
-        try:
-            os.chmod(p, 0o600)
-        except OSError:
-            pass
+    if not p.exists():
+        return
+    try:
+        text = p.read_text(encoding="utf-8-sig")
+    except UnicodeDecodeError:
+        # Fall back to permissive decode so an exotic encoding doesn't
+        # silently disable the entire app.
+        text = p.read_text(encoding="utf-8", errors="replace")
+    load_dotenv(stream=io.StringIO(text), override=True)
+    try:
+        os.chmod(p, 0o600)
+    except OSError:
+        pass
 
 
 _load_env_file()
