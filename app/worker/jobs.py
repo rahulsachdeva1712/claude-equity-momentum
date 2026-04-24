@@ -78,6 +78,38 @@ async def _market_is_open(dhan: DhanClient, conn: sqlite3.Connection) -> bool:
     return True
 
 
+SETTINGS_KEY_MARKET_STATUS = "market_status"
+
+
+async def market_status_poll_job(dhan: DhanClient) -> None:
+    """Poll Dhan `/marketfeed/marketstatus` and persist the result to the
+    `settings` table so the web process can render the top-bar pill without
+    making API calls itself (FRD B.2 forbids web-side Dhan writes).
+
+    Cadence: 30s always. The web side treats rows older than ~90s as stale
+    and shows 'unknown'. On transport errors we deliberately do NOT update
+    the row — the old value's `updated_at` naturally ages out to 'unknown',
+    which is the correct user-facing state during an outage.
+    """
+    try:
+        status = await dhan.market_status()
+    except DhanUnavailable as e:
+        log.debug("market_status poll failed: %s", e)
+        return
+    if not status:
+        return
+    conn = connect()
+    try:
+        with tx(conn):
+            conn.execute(
+                "INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)"
+                " ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+                (SETTINGS_KEY_MARKET_STATUS, status, now_ist().isoformat()),
+            )
+    finally:
+        conn.close()
+
+
 async def execution_job(
     dhan: DhanClient,
     provider: UniverseProvider | None = None,

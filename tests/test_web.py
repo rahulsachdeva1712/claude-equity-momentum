@@ -59,6 +59,51 @@ def test_root_redirects_to_paper(client):
     assert "/paper" in r.headers["location"]
 
 
+def test_market_pill_unknown_when_no_row(client):
+    # No market_status row written yet → pill renders 'unknown'.
+    r = client.get("/partials/top-bar")
+    assert r.status_code == 200
+    assert "market: unknown" in r.text
+
+
+def test_market_pill_reflects_fresh_row(client):
+    from app.db import connect
+    from app.time_utils import now_ist
+
+    conn = connect()
+    try:
+        conn.execute(
+            "INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)"
+            " ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+            ("market_status", "OPEN", now_ist().isoformat()),
+        )
+    finally:
+        conn.close()
+    r = client.get("/partials/top-bar")
+    assert "market: open" in r.text
+    assert "market: unknown" not in r.text
+
+
+def test_market_pill_unknown_when_row_stale(client):
+    from datetime import timedelta
+
+    from app.db import connect
+    from app.time_utils import now_ist
+
+    stale_ts = (now_ist() - timedelta(seconds=600)).isoformat()
+    conn = connect()
+    try:
+        conn.execute(
+            "INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)"
+            " ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+            ("market_status", "OPEN", stale_ts),
+        )
+    finally:
+        conn.close()
+    r = client.get("/partials/top-bar")
+    assert "market: unknown" in r.text
+
+
 def test_ack_alert(client):
     # Seed an alert via DB
     from app.db import connect

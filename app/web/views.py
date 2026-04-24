@@ -120,16 +120,50 @@ def alerts_unacked(conn: sqlite3.Connection, limit: int = 20) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-def top_bar_status(conn: sqlite3.Connection, token: str, worker_pid_alive: bool, live_enabled: bool, market_status: str | None) -> dict:
+def top_bar_status(conn: sqlite3.Connection, token: str, worker_pid_alive: bool, live_enabled: bool) -> dict:
     token_state, token_label = _classify_token(token)
+    market_status, market_age_s = _read_market_status(conn)
     return {
         "worker_alive": worker_pid_alive,
         "token_state": token_state,
         "token_label": token_label,
         "live_enabled": live_enabled,
-        "market_status": market_status or "unknown",
+        "market_status": market_status,
+        "market_age_s": market_age_s,
         "unacked_alerts": len(alerts_unacked(conn)),
     }
+
+
+# Stale threshold = 3 × polling cadence (30 s). If the worker missed three
+# consecutive polls the pill falls back to 'unknown' — fail-safe on worker
+# crash, token expiry, or Dhan outage.
+MARKET_STATUS_STALE_SECONDS = 90
+
+
+def _read_market_status(conn: sqlite3.Connection) -> tuple[str, int | None]:
+    """Read the polled market-status row. Returns (label, age_seconds).
+
+    - Missing row or stale row (> MARKET_STATUS_STALE_SECONDS) → ('unknown', age).
+    - Fresh row → (uppercased Dhan value, age).
+
+    Age is always returned so the template / CSS can show a staleness badge
+    even while the label is 'unknown'.
+    """
+    row = conn.execute(
+        "SELECT value, updated_at FROM settings WHERE key = 'market_status'"
+    ).fetchone()
+    if row is None:
+        return "unknown", None
+    try:
+        updated = datetime.fromisoformat(row["updated_at"])
+    except (TypeError, ValueError):
+        return "unknown", None
+    if updated.tzinfo is None:
+        updated = updated.replace(tzinfo=IST)
+    age_s = int((datetime.now(IST) - updated.astimezone(IST)).total_seconds())
+    if age_s > MARKET_STATUS_STALE_SECONDS:
+        return "unknown", age_s
+    return str(row["value"]).lower(), age_s
 
 
 def _classify_token(token: str, now: datetime | None = None) -> tuple[str, str]:

@@ -48,7 +48,6 @@ def _context(request: Request) -> dict:
             token=settings.dhan_access_token,
             worker_pid_alive=_worker_alive(),
             live_enabled=live_on,
-            market_status=None,
         )
         return {
             "request": request,
