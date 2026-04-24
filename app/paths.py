@@ -5,6 +5,17 @@ import os
 from pathlib import Path
 
 
+def project_root() -> Path:
+    """Repo root, resolved from this file's location (``<root>/app/paths.py``).
+
+    Used for files the developer edits by hand (``.env``). Runtime state
+    (db, logs, pid files, artifacts) still lives under ``state_dir()``
+    which is outside the repo so it survives ``git clean`` and keeps
+    secrets-free runtime data separate from source.
+    """
+    return Path(__file__).resolve().parent.parent
+
+
 def state_dir() -> Path:
     override = os.environ.get("EMRB_STATE_DIR")
     base = Path(override).expanduser() if override else Path.home() / ".claude-equity-momentum"
@@ -15,7 +26,14 @@ def state_dir() -> Path:
 
 
 def env_file() -> Path:
-    return state_dir() / ".env"
+    """``.env`` lives at the project root (``<repo>/.env``), ignored by git.
+
+    Rationale: the user edits this by hand to paste the daily Dhan access
+    token. Keeping it next to the repo makes it discoverable in an IDE and
+    matches the convention most Python projects follow. ``.gitignore``
+    already excludes ``.env``, so there's no accidental-commit risk.
+    """
+    return project_root() / ".env"
 
 
 def db_file() -> Path:

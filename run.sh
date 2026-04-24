@@ -16,21 +16,32 @@ fi
 
 STATE_DIR="$HOME/.claude-equity-momentum"
 mkdir -p "$STATE_DIR"
-if [ ! -f "$STATE_DIR/.env" ]; then
-    cp .env.example "$STATE_DIR/.env"
-    chmod 600 "$STATE_DIR/.env"
+
+# Credentials live at the project root (gitignored). Runtime state stays
+# in $STATE_DIR (db, logs, pid files).
+if [ ! -f "$ROOT/.env" ]; then
+    if [ -f "$ROOT/.env.example" ]; then
+        cp "$ROOT/.env.example" "$ROOT/.env"
+    else
+        cat >"$ROOT/.env" <<'EOF'
+# Credentials file. Gitignored. Paste a fresh Dhan access token daily.
+DHAN_CLIENT_ID=
+DHAN_ACCESS_TOKEN=
+EOF
+    fi
+    chmod 600 "$ROOT/.env"
     echo
     echo "First-time setup: paste DHAN_CLIENT_ID + DHAN_ACCESS_TOKEN into"
-    echo "  $STATE_DIR/.env"
+    echo "  $ROOT/.env"
     echo "Then rerun this script."
-    ${EDITOR:-vi} "$STATE_DIR/.env"
+    ${EDITOR:-vi} "$ROOT/.env"
     exit 0
 fi
 
 # Launch worker + web. Log to state dir; store background PIDs for stop.sh.
 WORKER_LOG="$STATE_DIR/logs/worker.out"
 WEB_LOG="$STATE_DIR/logs/web.out"
-mkdir -p "$STATE_DIR/logs"
+mkdir -p "$STATE_DIR/logs" "$STATE_DIR/run"
 
 ./.venv/bin/emrb-worker >"$WORKER_LOG" 2>&1 &
 WORKER_BG=$!
