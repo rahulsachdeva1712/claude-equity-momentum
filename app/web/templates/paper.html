@@ -17,14 +17,6 @@
     </div>
   </div>
 
-  <p class="subtitle muted">
-    Paper book start: {{ meta.book_start }}. Live session start: {{ meta.session_start }}.
-    Last updated: {{ meta.last_updated }}. Paper tracking auto-refreshes every 30 seconds while this tab is open.
-  </p>
-  <p class="subtitle-2 muted">
-    Live Dhan quotes are being used for the current paper MTM and open-position marks.
-  </p>
-
   {% if summary.open_positions or summary.closed_trades %}
   <div class="banner banner-info">Applied latest paper rebalance.</div>
   {% else %}
