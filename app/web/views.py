@@ -5,9 +5,10 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import date
+from datetime import date, datetime, timezone
 
-from app.dhan.client import jwt_seconds_to_expiry
+from app.dhan.client import jwt_expiry_epoch
+from app.time_utils import IST
 
 
 def _summary(conn: sqlite3.Connection, prefix: str) -> dict:
@@ -131,19 +132,53 @@ def top_bar_status(conn: sqlite3.Connection, token: str, worker_pid_alive: bool,
     }
 
 
-def _classify_token(token: str) -> tuple[str, str]:
+def _classify_token(token: str, now: datetime | None = None) -> tuple[str, str]:
     if not token:
         return "missing", "no token"
-    secs = jwt_seconds_to_expiry(token)
-    if secs is None:
+    exp_epoch = jwt_expiry_epoch(token)
+    if exp_epoch is None:
         # Token is set but doesn't parse as JWT. Most common cause on Windows
         # is a UTF-8 BOM in .env from Notepad fusing into the variable name,
         # or the value being wrapped in quotes / extra whitespace.
         return "invalid", "token unparseable (check .env for BOM/quotes)"
+    now_dt = now if now is not None else datetime.now(timezone.utc)
+    if now_dt.tzinfo is None:
+        now_dt = now_dt.replace(tzinfo=timezone.utc)
+    secs = exp_epoch - int(now_dt.timestamp())
+    exp_ist = datetime.fromtimestamp(exp_epoch, tz=timezone.utc).astimezone(IST)
+    hhmm = exp_ist.strftime("%H:%M")
     if secs <= 0:
-        return "expired", "expired"
+        day_label = _day_phrase(exp_ist.date(), now_dt.astimezone(IST).date())
+        return "expired", f"expired at {hhmm} IST {day_label} ({_format_ago(-secs)})"
     if secs <= 3600:
-        return "expiring", f"expires in {secs // 60} min"
+        return "expiring", f"expires in {secs // 60} min at {hhmm} IST"
     h = secs // 3600
     m = (secs % 3600) // 60
-    return "valid", f"valid, expires in {h}h {m}m"
+    return "valid", f"valid until {hhmm} IST ({h}h {m}m)"
+
+
+def _format_ago(secs: int) -> str:
+    """Compact relative-time suffix for past timestamps."""
+    if secs < 60:
+        return "just now"
+    if secs < 3600:
+        return f"{secs // 60}m ago"
+    if secs < 86400:
+        h = secs // 3600
+        m = (secs % 3600) // 60
+        return f"{h}h {m}m ago"
+    return f"{secs // 86400}d ago"
+
+
+def _day_phrase(when: date, today: date) -> str:
+    """Human-friendly day reference relative to today (both already in IST)."""
+    delta = (today - when).days
+    if delta == 0:
+        return "today"
+    if delta == 1:
+        return "yesterday"
+    if delta == -1:
+        return "tomorrow"
+    if -7 < delta < 7:
+        return when.strftime("%A")
+    return when.isoformat()
