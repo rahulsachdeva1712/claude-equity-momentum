@@ -1,7 +1,12 @@
 {% extends "base.html" %}
 {% block content %}
 <section class="tab-body" hx-get="/paper" hx-trigger="every 30s" hx-select=".tab-body" hx-target=".tab-body" hx-swap="outerHTML">
-  <h2>Paper Trading</h2>
+  <div class="tab-header">
+    <h2>Paper Trading</h2>
+    <form method="post" action="/actions/run-rebalance" class="inline-form">
+      <button type="submit" class="btn btn-secondary" title="Drop a signal for the worker to run the 09:30 rebalance off-schedule. Worker rejects if today's run already completed (FRD B.13).">Run rebalance now</button>
+    </form>
+  </div>
 
   <div class="tiles">
     <div class="tile">

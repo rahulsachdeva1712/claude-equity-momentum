@@ -58,3 +58,10 @@ table.data th { background:#f9fafb; font-weight:600; font-size: 11px; color: var
 .alert .msg { flex: 1; }
 
 code { background:#f3f4f6; padding: 1px 4px; border-radius: 4px; }
+
+.tab-header { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 10px; }
+.tab-header h2 { margin: 0; }
+.inline-form { display: inline; margin: 0; }
+.btn { cursor: pointer; padding: 6px 12px; border-radius: 6px; border: 1px solid var(--border); background: #fff; font-size: 13px; }
+.btn:hover { background: #f9fafb; }
+.btn-secondary { color: #111827; }
