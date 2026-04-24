@@ -91,8 +91,10 @@ async def execution_job(
     3. Narrow to static-eligibility survivors; fetch 09:25-09:29 intraday
        candles for those symbols; compute vol_0925_0930 and apply the volume
        gate.
-    4. Rank the volume-qualified set by relative_return_126d, take top 5,
-       build target weights and cash-aware target quantities.
+    4. Rank the volume-qualified set by relative_return_63d, take top 20,
+       build target weights under the configured weight_scheme (inv_atr
+       baseline: w_i proportional to 1 / atr_pct_i) and cash-aware target
+       quantities.
     5. Persist `signals` rows and generate paper orders via diff against
        current paper_book.
     6. Fetch 09:30 minute-candle close; fill paper orders; if live enabled,

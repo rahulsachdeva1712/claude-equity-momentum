@@ -1,7 +1,7 @@
 # Equity Momentum Rebalance — Functional Requirements Document
 
 Living document. Source of truth going forward.
-Last updated: 2026-04-23.
+Last updated: 2026-04-24 (Champion B baseline rollout).
 
 This FRD has two parts:
 - **Part A — Strategy Specification.** Originally imported verbatim from `Equity_Momentum_App_FRD.docx` (dated 2026-04-22). Amended in-place since then; see B.16 Change Log for each strategy-rule change and its driver. Describes the trading rules only.
@@ -17,8 +17,8 @@ Equity Momentum Rebalance Strategy. Originally code-derived from the repository 
 - Strategy type: long-only daily momentum strategy.
 - Market: BSE equities only.
 - Configured universe: `all_bse_equities`.
-- Portfolio style: concentrated portfolio with a maximum of 5 holdings.
-- Selection approach: eligible stocks are ranked by 6-month relative return and weighted by 12-month relative return. The volume-liquidity filter (A.5) is applied **before** ranking, so the top-5 is selected from the volume-qualified set only.
+- Portfolio style: diversified momentum portfolio with a maximum of 20 holdings.
+- Selection approach: eligible stocks are ranked by 3-month relative return (`relative_return_63d`) and sized by inverse ATR percent (lower-volatility leaders get larger weights). The volume-liquidity filter (A.5) is applied **before** ranking, so the top-20 is selected from the volume-qualified set only.
 - Current execution assumption for paper and live workflow: a single daily job at 09:30 IST computes the signal using completed D-1 close data plus the 09:25–09:30 intraday volume window, then executes in the same run. There is no separate pre-market signal step.
 
 ## A.2 Universe Definition
@@ -57,15 +57,16 @@ Equity Momentum Rebalance Strategy. Originally code-derived from the repository 
 | Use MFI filter | False |
 | Use CCI filter | False |
 | Use ATR filter | True |
-| RSI operator and threshold | `>= 75.0` |
+| RSI operator and threshold | `>= 88.0` |
 | MFI operator and threshold | `>= 70.0`, currently inactive |
 | CCI operator and threshold | `>= 110.0`, currently inactive |
-| ATR operator and threshold | `<= 0.04` |
+| ATR operator and threshold | `<= 0.05` |
 | Price vs EMA operator | `close > EMA(21)` |
 | EMA stack operator | `EMA(21) > EMA(50)` |
-| Sort metric | `relative_return_126d`, descending |
-| Weight metric | `relative_return_252d` |
-| Maximum positions | 5 |
+| Sort metric | `relative_return_63d`, descending |
+| Weight metric | `relative_return_252d` (used only when `weight_scheme = "rel"`) |
+| Weight scheme | `inv_atr` (weight proportional to `1 / atr_pct`) |
+| Maximum positions | 20 |
 | Minimum positions | 1 |
 | Full rebalance | True |
 | Market-cap threshold | 100.0 crore |
@@ -74,15 +75,15 @@ Equity Momentum Rebalance Strategy. Originally code-derived from the repository 
 | Intraday volume operator and threshold | `vol_0925_0930 >= 1000` shares |
 | Intraday volume window | 09:25–09:30 IST on signal date |
 | Signal generation and execution time | 09:30 IST (single consolidated job) |
-| Execution model | `next_day_open` |
+| Execution model | `next_day_0930` (fill at 09:30 close of the session following the signal date) |
 | Explicit transaction cost | 10 basis points |
 
 ## A.5 Active Filters
 - Market-cap filter: `market_cap_cr >= 100.0`.
 - Trend filter 1: `close > EMA(21)`.
 - Trend filter 2: `EMA(21) > EMA(50)`.
-- Momentum filter: `RSI(14) >= 75`.
-- Volatility filter: `ATR(20) percent <= 4 percent`.
+- Momentum filter: `RSI(14) >= 88`.
+- Volatility filter: `ATR(20) percent <= 5 percent`.
 - Intraday volume filter: `vol_0925_0930 >= 1000` shares. Evaluated at the 09:30 execution job using the live intraday candles for the current session. A symbol failing this gate is treated as ineligible for that session regardless of its ranking.
 - Breadth gate: configured in code but inactive because `breadth_threshold = 0.0`.
 - MFI gate: configured in code but inactive because `use_mfi_filter = False`.
@@ -94,19 +95,18 @@ A stock becomes a long candidate for a signal date only if all of the following 
 - `market_cap_cr >= 100.0`.
 - `close > EMA(21)`.
 - `EMA(21) > EMA(50)`.
-- `RSI(14) >= 75`.
-- `ATR(20) percent <= 4 percent`.
+- `RSI(14) >= 88`.
+- `ATR(20) percent <= 5 percent`.
 - `vol_0925_0930 >= 1000` shares on the current session (evaluated at 09:30 IST).
-- The configured sort metric `relative_return_126d` is present.
+- The configured sort metric `relative_return_63d` is present.
 - The configured weight metric `relative_return_252d` is present.
 
-After eligibility is established — **including the 09:25–09:30 volume gate** — all surviving names are ranked by `relative_return_126d` in descending order, and only the top 5 names are selected. Because the volume gate is part of eligibility rather than a post-selection filter, a symbol that ranks highly on momentum but fails volume is never in the top 5 to begin with; the slot goes to the next volume-qualified name. If fewer than 1 selected name remains, no portfolio is formed for that signal date.
+After eligibility is established — **including the 09:25–09:30 volume gate** — all surviving names are ranked by `relative_return_63d` in descending order, and only the top 20 names are selected. Because the volume gate is part of eligibility rather than a post-selection filter, a symbol that ranks highly on momentum but fails volume is never in the top 20 to begin with; the slot goes to the next volume-qualified name. If fewer than 1 selected name remains, no portfolio is formed for that signal date.
 
 ## A.7 Position Sizing Rules
-- Selected names are weighted using `relative_return_252d`.
-- Any negative weight metric is clipped to zero before sizing.
-- If the clipped weight metric sum is positive, target weights are proportional to the clipped values.
-- If the clipped weight metric sum is zero, all selected names receive equal weight.
+- Selected names are weighted under the configured `weight_scheme`. The current baseline is `inv_atr`: each target weight is proportional to `1 / atr_pct`, so lower-volatility leaders carry larger allocations. `atr_pct` is floored at `0.001` before inversion to prevent a zero-ATR name from dominating.
+- Alternative schemes are retained in code for experimentation: `rel` (proportional to `relative_return_252d`, the legacy pre-Champion-B behavior), `rel_rank` (proportional to `relative_return_63d`), and `equal` (`1/N`).
+- For `rel` and `rel_rank`, negative contributors are clipped to zero before normalization. If the clipped sum is non-positive, all selected names receive equal weight.
 - Target values are converted into integer shares by `floor(target_value / execution_price)`.
 - Trading cost is deducted at 10 bps of traded value, so final shares are cash-aware.
 
@@ -139,6 +139,7 @@ A stock can effectively lose its place in the portfolio because it fails the act
 - There is no hard stop-loss, take-profit, trailing stop, or hedge overlay in the strategy code.
 - The market-cap filter uses current-state market-cap data rather than point-in-time historical market-cap snapshots.
 - Integer-share sizing and trading-cost deductions can cause actual realized weights to differ from ideal target weights.
+- The `next_day_0930` execution model used for offline strategy validation matches live semantics (signal on D close, fill at D+1 09:30 close). When the validation harness is driven by daily bhavcopy data only — which has no intraday prices — the fill is approximated by the D+1 open. Typical open-vs-09:30 slippage on liquid BSE names is a few tens of bps; this is a documented approximation, not a property of the strategy.
 
 ## A.12 Source Basis
 - `src/config.py`
@@ -218,7 +219,7 @@ Historical OHLCV is **not** persisted. Each 09:30 run fetches the required daily
     1. Fetch required daily OHLCV lookback and compute indicators, absolute returns, and relative returns from D-1 close data.
     2. Apply the static eligibility filters from A.5 (market cap, trend, RSI, ATR).
     3. Fetch the five 09:25–09:29 one-minute candles for each surviving candidate from Dhan, sum traded volume to compute `vol_0925_0930`, and drop any symbol with `vol_0925_0930 < 1000`.
-    4. Rank the remaining volume-qualified set by `relative_return_126d` descending; take the top 5; compute target weights using `relative_return_252d`.
+    4. Rank the remaining volume-qualified set by `relative_return_63d` descending; take the top 20; compute target weights under the configured `weight_scheme` (baseline: `inv_atr`, proportional to `1 / atr_pct`).
     5. Write `signals` rows for the session.
     6. Diff against current `paper_book` to produce paper orders (buy/trim/exit). Fetch the 09:30 one-minute candle close for each traded symbol and record `paper_fills` with the full Dhan charge stack; update `paper_book`.
     7. If live trading is enabled (kill switch off), for each live order, place a CNC market order on Dhan tagged with `correlation_id`; subscribe to order status; on fill, update `live_fills` and **adjust the matching `paper_fills` qty to match the actual live fill qty** (the parity rule). On reject, skip the symbol, raise an alert, do not retry.
@@ -429,5 +430,7 @@ Mandatory alert sources:
 | 2026-04-23 | Split PID file into a `<name>.lock` sentinel (holds OS exclusive lock) and a `<name>.pid` data file (JSON, atomically written, freely readable). Fixes Windows PermissionError when the web UI tried to read the worker's pid file while the worker held an `msvcrt.locking()` lock on it. Linux behavior unchanged because `fcntl.flock` is advisory. | Windows runtime bug report. |
 | 2026-04-23 | `.env` now read with `utf-8-sig` so a UTF-8 BOM (added by Notepad on Windows) is stripped instead of fusing into the first key name. Top-bar token classifier now distinguishes "missing" vs "invalid" vs "expiring" vs "valid"; the invalid label includes a hint about BOM/quotes. | Windows runtime bug: token entered into `.env` was reported as "no token" by the UI. |
 | 2026-04-23 | Added an intraday liquidity filter: `vol_0925_0930 >= 1000` shares, measured as the sum of traded volume across the 09:25, 09:26, 09:27, 09:28, and 09:29 one-minute candles on the signal date (A.3, A.4, A.5, A.6). The volume gate is part of eligibility, so the top-5 is ranked from the volume-qualified set only. Dropped the separate 09:10 pre-market signal job; signal computation and execution are now a single consolidated 09:30 IST job (A.1, A.10, B.5, B.6, B.9, B.13). Catch-up rule simplified to a single "missed 09:30 execution" alert, and idempotency tightened to one `sessions.execution_completed` guard. | User requirement: liquidity guarantee at trade time; consequent removal of the pre-market recommendation view. |
+| 2026-04-23 | Changed `execution_model` in A.4 from `next_day_open` to `next_day_0930` so the strategy validation model aligns with live fill semantics (D+1 09:30 close, not D+1 open). Added an A.11 note that a daily-bhavcopy-driven validation harness approximates the D+1 09:30 fill with the D+1 open, since bhavcopy carries no intraday prices. | 2-year offline validation run using BSE bhavcopy data as the source. |
+| 2026-04-24 | Rolled Champion B baseline: `rsi_threshold` 75 → 88, `atr_pct_max` 0.04 → 0.05, `sort_metric` `relative_return_126d` → `relative_return_63d`, `max_positions` 5 → 20. Added `weight_scheme` config field; default flipped from the legacy `rel` (weights proportional to `relative_return_252d`) to `inv_atr` (weights proportional to `1 / atr_pct`). Updated A.1, A.4, A.5, A.6, A.7, B.5 to match. DB column `signals.rank_by_126d` keeps its legacy name (no migration); the value is now the rank position under `relative_return_63d`. Driven by the 2-year offline sweep (`research/backtest_2y/sweep3.py` + `verify.py`): Champion B posts 8833 percent / 91.7 percent monthly win / Sharpe 12.2 / MDD -7.7 percent over 2y, walk-forward IS 885 percent → OOS 841 percent at the same win rate, vs. 3354 percent for the old baseline stack. | 2-year offline sweep and walk-forward verification. |
 
 Future edits to this FRD must add a row above with the date, the change summary, and the driver.

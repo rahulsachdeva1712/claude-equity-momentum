@@ -21,17 +21,23 @@ class StrategyConfig:
     use_atr_filter: bool = True
     use_volume_filter: bool = True
 
-    rsi_threshold: float = 75.0
+    rsi_threshold: float = 88.0
     mfi_threshold: float = 70.0
     cci_threshold: float = 110.0
-    atr_pct_max: float = 0.04
+    atr_pct_max: float = 0.05
     # FRD A.5: vol_0925_0930 >= 1000 shares (sum of 09:25, 09:26, 09:27, 09:28, 09:29 one-minute candle volumes).
     intraday_volume_min: float = 1000.0
 
-    sort_metric: str = "relative_return_126d"
+    sort_metric: str = "relative_return_63d"
     weight_metric: str = "relative_return_252d"
+    # Position-sizing scheme. One of:
+    #   "inv_atr"  -- weight proportional to 1 / atr_pct  (Champion B baseline)
+    #   "rel"      -- weight proportional to `weight_metric` (legacy)
+    #   "rel_rank" -- weight proportional to `sort_metric`
+    #   "equal"    -- 1/N across selected names
+    weight_scheme: str = "inv_atr"
 
-    max_positions: int = 5
+    max_positions: int = 20
     min_positions: int = 1
     full_rebalance: bool = True
 
