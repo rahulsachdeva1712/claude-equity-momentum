@@ -20,15 +20,26 @@ This split is required because msvcrt.locking() on Windows is mandatory:
 locking the pid file directly causes PermissionError when other processes
 try to read it. fcntl.flock on Linux is advisory and would not exhibit this,
 so the bug only surfaced on Windows.
+
+Windows hang protection. `msvcrt.locking(fd, LK_NBLCK, 1)` is documented as
+non-blocking but in practice retries ~10 times with 1-second sleeps before
+raising, and `os.open()` on a `.lock` file can itself block if a dead
+predecessor still has a kernel handle without FILE_SHARE_*. To bound the
+worst case, the open+lock step runs in a worker thread with a hard
+`LOCK_ACQUIRE_TIMEOUT_S` ceiling. Exceeding the ceiling is reported as
+AlreadyRunning so the caller gets a clean, logged error instead of a silent
+hang.
 """
 from __future__ import annotations
 
 import atexit
 import json
+import logging
 import os
 import signal
 import sys
 import tempfile
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -37,6 +48,14 @@ from typing import Callable, Optional
 import psutil
 
 from app.paths import lock_file, pid_file
+
+log = logging.getLogger("pidfile")
+
+# Hard ceiling on how long we'll wait for the exclusive byte-range lock on the
+# .lock sentinel. Must exceed msvcrt.locking()'s internal retry window
+# (~10 seconds) so genuine contention gets a real shot, but short enough that
+# a wedged predecessor is surfaced quickly rather than silently hanging.
+LOCK_ACQUIRE_TIMEOUT_S = 15.0
 
 
 @dataclass
@@ -113,14 +132,29 @@ def check_stale(name: str) -> StaleInfo:
     return StaleInfo(cleaned=False, previous_pid=pid, reason="dead or wrong cmd")
 
 
-def _safe_unlink(path: Path) -> None:
+def _safe_unlink(path: Path, warn_on_busy: bool = False) -> bool:
+    """Remove `path` if it exists. Return True on success, False otherwise.
+
+    On Windows, the OS can keep a file handle alive for seconds-to-minutes
+    after the owning process dies (especially if the file was opened without
+    FILE_SHARE_DELETE), causing unlink to raise PermissionError. We don't want
+    this to abort startup — but for the lock-file path it's a strong signal
+    that a dead predecessor's handle is still lingering, so pass
+    ``warn_on_busy=True`` at that site to make the failure visible in logs
+    rather than swallowing it silently.
+    """
     try:
         path.unlink()
+        return True
     except FileNotFoundError:
-        pass
-    except PermissionError:
-        # Windows: another process may be reading; leave it for next startup.
-        pass
+        return True
+    except PermissionError as e:
+        if warn_on_busy:
+            log.warning(
+                "pidfile: could not unlink %s (handle still held by another process?): %s",
+                path, e,
+            )
+        return False
 
 
 def _atomic_write_text(path: Path, text: str) -> None:
@@ -171,21 +205,37 @@ class PidFile:
         self.release()
 
     def acquire(self) -> None:
+        log.debug("pidfile[%s]: acquire start (pid=%d)", self.name, os.getpid())
         info = check_stale(self.name)
+        log.debug(
+            "pidfile[%s]: stale check -> reason=%r previous_pid=%s",
+            self.name, info.reason, info.previous_pid,
+        )
         if info.reason == "live process":
             raise AlreadyRunning(self.name, info.previous_pid or -1)
         if info.previous_pid is not None or info.reason in ("corrupt pid file", "missing pid field"):
+            log.debug("pidfile[%s]: cleaning stale pid + lock files", self.name)
             _safe_unlink(self.path)
-            _safe_unlink(self.lock_path)
+            _safe_unlink(self.lock_path, warn_on_busy=True)
             self.stale_info = StaleInfo(cleaned=True, previous_pid=info.previous_pid, reason=info.reason)
 
         self.lock_path.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(self.lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        log.debug(
+            "pidfile[%s]: opening + locking %s (timeout=%.1fs)",
+            self.name, self.lock_path, LOCK_ACQUIRE_TIMEOUT_S,
+        )
         try:
-            self._try_exclusive_lock(fd)
-        except (BlockingIOError, PermissionError, OSError) as e:
-            os.close(fd)
+            fd = self._open_and_lock_with_timeout(LOCK_ACQUIRE_TIMEOUT_S)
+        except TimeoutError as e:
+            log.error(
+                "pidfile[%s]: open+lock exceeded %.1fs; treating as already-running. "
+                "A previous %s may have died leaving a kernel handle on %s.",
+                self.name, LOCK_ACQUIRE_TIMEOUT_S, self.name, self.lock_path,
+            )
             raise AlreadyRunning(self.name, -1) from e
+        except (BlockingIOError, PermissionError, OSError) as e:
+            raise AlreadyRunning(self.name, -1) from e
+        log.debug("pidfile[%s]: exclusive lock acquired (fd=%d)", self.name, fd)
         self._lock_fd = fd
 
         record = {
@@ -194,9 +244,65 @@ class PidFile:
             "cmd": self.name,
         }
         _atomic_write_text(self.path, json.dumps(record))
+        log.debug("pidfile[%s]: pid file written at %s", self.name, self.path)
 
         self._install_signal_handlers()
         atexit.register(self._atexit_shutdown)
+        log.debug("pidfile[%s]: acquire done", self.name)
+
+    def _open_and_lock_with_timeout(self, timeout: float) -> int:
+        """Run os.open + _try_exclusive_lock in a worker thread, bounded by
+        `timeout` seconds. Returns the locked fd on success.
+
+        Why a thread. Two independent failure modes on Windows can stall the
+        main thread past a user-tolerable deadline:
+
+        1. `os.open(lock_path, O_RDWR | O_CREAT)` can block if a dead
+           predecessor's kernel handle is still present without FILE_SHARE_*.
+        2. `msvcrt.locking(fd, LK_NBLCK, 1)` silently retries ~10 times with
+           1-second sleeps before raising, which looks indistinguishable from
+           a hang to a user watching the terminal.
+
+        Wrapping both calls in a `threading.Thread(...).join(timeout=...)` gives
+        a hard upper bound that works regardless of which syscall is the
+        culprit. If the thread is still alive at timeout, we abandon it as a
+        daemon (the OS will release any stray handles on process exit) and
+        raise TimeoutError, which `acquire()` converts to AlreadyRunning so the
+        caller path is uniform.
+        """
+        result: dict = {"fd": None, "exc": None}
+
+        def target() -> None:
+            try:
+                fd = os.open(self.lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+            except BaseException as e:
+                result["exc"] = e
+                return
+            try:
+                self._try_exclusive_lock(fd)
+            except BaseException as e:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+                result["exc"] = e
+                return
+            result["fd"] = fd
+
+        t = threading.Thread(target=target, daemon=True, name=f"pidfile-{self.name}-lock")
+        t.start()
+        t.join(timeout=timeout)
+
+        if t.is_alive():
+            # Thread is wedged in a blocking syscall. We can't interrupt it in
+            # Python, but daemon=True means it won't keep the interpreter alive
+            # past main-thread exit. Abandon it and signal the caller.
+            raise TimeoutError(f"pidfile[{self.name}] lock acquisition exceeded {timeout:.1f}s")
+
+        if result["exc"] is not None:
+            raise result["exc"]
+        assert result["fd"] is not None
+        return result["fd"]
 
     def register_shutdown(self, cb: Callable[[], None]) -> None:
         self._shutdown_cbs.append(cb)
