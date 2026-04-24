@@ -11,6 +11,7 @@ from app.dhan.client import DhanClient
 from app.time_utils import IST
 from app.worker.jobs import (
     execution_job,
+    market_status_poll_job,
     recon_job,
     token_expiry_monitor_job,
     token_watcher_job,
@@ -44,5 +45,13 @@ def build_scheduler(dhan: DhanClient) -> AsyncIOScheduler:
     scheduler.add_job(
         token_expiry_monitor_job, CronTrigger(minute="*", timezone=IST),
         args=(dhan, tok_state), id="token_expiry", coalesce=True, max_instances=1,
+    )
+    # Poll Dhan market status every 30s and persist to the `settings` table.
+    # The web process reads this for the top-bar pill (FRD B.2 forbids web
+    # making Dhan calls, so the worker is the only writer). ~2 RPM is well
+    # under Dhan's quota. Staleness is handled on the read side.
+    scheduler.add_job(
+        market_status_poll_job, CronTrigger(second="*/30", timezone=IST),
+        args=(dhan,), id="market_status", coalesce=True, max_instances=1,
     )
     return scheduler
