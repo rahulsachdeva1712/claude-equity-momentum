@@ -126,7 +126,10 @@ def test_empty_when_none_eligible():
 
 
 def test_max_positions_cap_respected():
-    cfg = StrategyConfig()  # max_positions=5
+    # Pin max_positions=5 explicitly rather than relying on the baseline
+    # default (which changes over time as strategy rolls forward); the test
+    # cares that the cap is enforced, not what the cap happens to be.
+    cfg = StrategyConfig(max_positions=5)
     n = 300
     syms = {f"S{i}": np.array([100.0 * ((1.004 + i * 0.0002) ** k) for k in range(n)]) for i in range(8)}
     panel = _build_panel(

@@ -9,8 +9,6 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from datetime import date
-from typing import Iterable
-
 import numpy as np
 import pandas as pd
 
@@ -149,13 +147,37 @@ def static_eligible_symbols(
     return [str(s) for s in day.loc[mask, "symbol"].tolist()]
 
 
-def _target_weights(sort_vals: Iterable[float], weight_vals: Iterable[float]) -> list[float]:
-    clipped = [max(0.0, w) for w in weight_vals]
-    s = sum(clipped)
-    if s > 0:
-        return [w / s for w in clipped]
-    n = len(clipped)
-    return [1.0 / n] * n if n else []
+def _target_weights(selected: pd.DataFrame, cfg: StrategyConfig) -> list[float]:
+    """Compute per-position target weights under the configured weight scheme.
+
+    FRD A.7. Supported schemes:
+      - "inv_atr":  w_i proportional to 1 / atr_pct_i (lower vol -> larger weight)
+      - "rel":      w_i proportional to `weight_metric` (legacy: relative_return_252d)
+      - "rel_rank": w_i proportional to `sort_metric`
+      - "equal":    w_i = 1/N
+
+    Any non-positive contributor is clipped to zero before normalization; if
+    the resulting sum is non-positive, we fall back to equal weights.
+    """
+    n = len(selected)
+    if n == 0:
+        return []
+    scheme = cfg.weight_scheme
+    if scheme == "equal":
+        return [1.0 / n] * n
+    if scheme == "inv_atr":
+        a = selected["atr_pct"].clip(lower=0.001).to_numpy(dtype=float)
+        raw = 1.0 / a
+    elif scheme == "rel_rank":
+        raw = selected[cfg.sort_metric].clip(lower=0.0).to_numpy(dtype=float)
+    elif scheme == "rel":
+        raw = selected[cfg.weight_metric].clip(lower=0.0).to_numpy(dtype=float)
+    else:
+        raise ValueError(f"unknown weight_scheme: {scheme!r}")
+    s = float(raw.sum())
+    if s <= 0:
+        return [1.0 / n] * n
+    return (raw / s).tolist()
 
 
 def build_target_set(
@@ -195,7 +217,7 @@ def build_target_set(
     if len(selected) < cfg.min_positions:
         return TargetSet(session_date=session_date, rows=(), capital=capital)
 
-    weights = _target_weights(selected[cfg.sort_metric], selected[cfg.weight_metric])
+    weights = _target_weights(selected, cfg)
     selected["weight"] = weights
     selected["target_value"] = selected["weight"] * capital
 
