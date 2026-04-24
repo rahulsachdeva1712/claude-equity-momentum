@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="tab-body config-tab">
+  <h2 class="page-title">Config</h2>
+  <p class="muted">Strategy parameters and filesystem paths. Champion B baseline (see docs/FRD.md §A).</p>
+
+  <h3 class="section-title">Strategy (Champion B)</h3>
+  <table class="data">
+    <thead><tr><th>Parameter</th><th>Value</th></tr></thead>
+    <tbody>
+      <tr><td>Top-N</td><td class="num">20</td></tr>
+      <tr><td>Volatility lookback</td><td class="num">88 days</td></tr>
+      <tr><td>Position sizing window</td><td class="num">20 days</td></tr>
+      <tr><td>ADV floor</td><td class="num">10,000 shares (20-day)</td></tr>
+      <tr><td>Equity series filter</td><td>A, B, T, X, XT</td></tr>
+      <tr><td>Market-cap gate</td><td>disabled</td></tr>
+      <tr><td>Turnover floor</td><td>disabled</td></tr>
+      <tr><td>Volume gate (09:25–09:29)</td><td class="num">1,000 shares</td></tr>
+      <tr><td>Rebalance time</td><td>09:30 IST (Mon–Fri)</td></tr>
+      <tr><td>Universe refresh</td><td>18:00 IST (Mon–Fri)</td></tr>
+    </tbody>
+  </table>
+
+  <h3 class="section-title">Filesystem</h3>
+  <table class="data">
+    <thead><tr><th>Path</th><th>Location</th></tr></thead>
+    <tbody>
+      <tr><td>State dir</td><td class="mono-sm">{{ state_dir }}</td></tr>
+      <tr><td>SQLite DB</td><td class="mono-sm">{{ db_path }}</td></tr>
+      <tr><td>Universe CSV</td><td class="mono-sm">{{ universe_csv }}</td></tr>
+      <tr><td>.env</td><td class="mono-sm">{{ env_path }}</td></tr>
+    </tbody>
+  </table>
+</section>
+{% endblock %}

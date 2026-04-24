@@ -1,89 +1,274 @@
 {% extends "base.html" %}
 {% block content %}
-<section class="tab-body" hx-get="/paper" hx-trigger="every 30s" hx-select=".tab-body" hx-target=".tab-body" hx-swap="outerHTML">
+<section class="tab-body paper-dashboard"
+         hx-get="/paper" hx-trigger="every 30s"
+         hx-select=".tab-body" hx-target=".tab-body" hx-swap="outerHTML">
+
+  {# ---------- HEADER ---------- #}
   <div class="tab-header">
-    <h2>Paper Trading</h2>
-    <form method="post" action="/actions/run-rebalance" class="inline-form">
-      <button type="submit" class="btn btn-secondary" title="Drop a signal for the worker to run the 09:30 rebalance off-schedule. Worker rejects if today's run already completed (FRD B.13).">Run rebalance now</button>
-    </form>
+    <h2 class="page-title">Paper Trading</h2>
+    <div class="header-actions">
+      <form method="post" action="/actions/run-rebalance" class="inline-form">
+        <button type="submit" class="btn"
+                title="Drop a sentinel for the worker to run the 09:30 rebalance off-schedule (FRD B.13).">
+          Refresh Paper Trading
+        </button>
+      </form>
+    </div>
   </div>
 
-  <div class="tiles">
-    <div class="tile">
-      <div class="tile-label">Today's MTM</div>
-      <div class="tile-value">Rs {{ '%.2f'|format(summary.today_mtm) }}</div>
+  <p class="subtitle muted">
+    Paper book start: {{ meta.book_start }}. Live session start: {{ meta.session_start }}.
+    Last updated: {{ meta.last_updated }}. Paper tracking auto-refreshes every 30 seconds while this tab is open.
+  </p>
+  <p class="subtitle-2 muted">
+    Live Dhan quotes are being used for the current paper MTM and open-position marks.
+  </p>
+
+  {% if summary.open_positions or summary.closed_trades %}
+  <div class="banner banner-info">Applied latest paper rebalance.</div>
+  {% else %}
+  <div class="banner banner-warn">
+    No paper data yet for today. After the worker finishes the 09:30 rebalance this tab will populate automatically.
+  </div>
+  {% endif %}
+
+  {# ---------- KPI ROW + SIGNALS ---------- #}
+  <div class="kpi-and-signals">
+    <div class="kpi-row">
+      <div class="kpi">
+        <div class="kpi-label">Today's Change</div>
+        <div class="kpi-value {{ 'pos' if summary.today_change>=0 else 'neg' }}">
+          Rs {{ '%.2f'|format(summary.today_change) }}
+        </div>
+      </div>
+      <div class="kpi">
+        <div class="kpi-label">Today Realized</div>
+        <div class="kpi-value {{ 'pos' if summary.today_realized>=0 else 'neg' }}">
+          Rs {{ '%.2f'|format(summary.today_realized) }}
+        </div>
+      </div>
+      <div class="kpi">
+        <div class="kpi-label">Unrealized P&amp;L</div>
+        <div class="kpi-value {{ 'pos' if summary.today_unrealized>=0 else 'neg' }}">
+          Rs {{ '%.2f'|format(summary.today_unrealized) }}
+        </div>
+      </div>
+      <div class="kpi">
+        <div class="kpi-label">Cumulative P&amp;L</div>
+        <div class="kpi-value {{ 'pos' if summary.cumulative>=0 else 'neg' }}">
+          Rs {{ '%.2f'|format(summary.cumulative) }}
+        </div>
+      </div>
     </div>
-    <div class="tile">
-      <div class="tile-label">Today Realized</div>
-      <div class="tile-value">Rs {{ '%.2f'|format(summary.today_realized) }}</div>
+
+    <div class="signals-card">
+      <div class="card-title">Signals For Today</div>
+      <table class="data compact">
+        <thead>
+          <tr><th>Action</th><th>Symbol</th><th>Target Qty</th><th>Signal Generated At</th><th>Trade At</th></tr>
+        </thead>
+        <tbody>
+          {% for s in signals_brief %}
+          <tr>
+            <td><span class="badge badge-buy">{{ s.action }}</span></td>
+            <td class="mono">{{ s.symbol }}</td>
+            <td class="num">{{ s.target_qty }}</td>
+            <td class="mono-sm">{{ s.signal_generated_at }}</td>
+            <td class="mono-sm">{{ s.trade_at }}</td>
+          </tr>
+          {% else %}<tr><td colspan="5" class="muted">No signals for today.</td></tr>{% endfor %}
+        </tbody>
+      </table>
     </div>
-    <div class="tile">
-      <div class="tile-label">Unrealized P&amp;L</div>
-      <div class="tile-value">Rs {{ '%.2f'|format(summary.today_unrealized) }}</div>
-    </div>
-    <div class="tile">
-      <div class="tile-label">Cumulative P&amp;L</div>
-      <div class="tile-value">Rs {{ '%.2f'|format(summary.cumulative) }}</div>
-    </div>
-    <div class="tile"><div class="tile-label">Open Positions</div><div class="tile-value">{{ summary.open_positions }}</div></div>
-    <div class="tile"><div class="tile-label">Closed Fills</div><div class="tile-value">{{ summary.closed_fills }}</div></div>
   </div>
 
-  <h3>Signals For Today</h3>
-  <table class="data">
-    <thead><tr><th>Symbol</th><th>Rank</th><th>Target Qty</th><th>Weight</th><th>Ref Price</th><th>Selected</th></tr></thead>
+  {# ---------- KPI ROW 2 ---------- #}
+  <div class="kpi-row six">
+    <div class="kpi"><div class="kpi-label">Open Positions</div><div class="kpi-value">{{ summary.open_positions }}</div></div>
+    <div class="kpi"><div class="kpi-label">Closed Trades</div><div class="kpi-value">{{ summary.closed_trades }}</div></div>
+    <div class="kpi"><div class="kpi-label">Win Rate</div><div class="kpi-value">{{ '%.2f'|format(summary.win_rate) }}%</div></div>
+    <div class="kpi"><div class="kpi-label">Avg P&amp;L / Closed Trade</div>
+      <div class="kpi-value {{ 'pos' if summary.avg_pnl_per_closed>=0 else 'neg' }}">
+        Rs {{ '%.2f'|format(summary.avg_pnl_per_closed) }}
+      </div>
+    </div>
+    <div class="kpi"><div class="kpi-label">Profit Factor</div>
+      <div class="kpi-value">{% if summary.profit_factor_is_inf %}inf{% else %}{{ '%.2f'|format(summary.profit_factor) }}{% endif %}</div>
+    </div>
+    <div class="kpi"><div class="kpi-label">Max Drawdown</div>
+      <div class="kpi-value neg">Rs {{ '%.2f'|format(summary.max_drawdown) }}</div>
+    </div>
+  </div>
+
+  {# ---------- TODAY STATUS ---------- #}
+  <h3 class="section-title">Today Status <span class="muted" style="font-size: 12px;">▾</span></h3>
+  <table class="data today-status">
+    <thead>
+      <tr>
+        <th>Index</th><th>Date</th><th>Trade Slot</th><th>Status</th><th>Trade Opened</th>
+        <th>Open Legs</th><th>Investment Rs</th><th>Today's MTM</th><th>Realized Rs</th>
+        <th>Open Unrealized P&amp;L</th><th>Return %</th><th>Exit Type</th><th>Marked At</th>
+      </tr>
+    </thead>
     <tbody>
-      {% for s in signals %}
-      <tr><td>{{ s.symbol }}</td><td>{{ s.rank_by_126d }}</td><td>{{ s.target_qty }}</td>
-          <td>{{ '%.4f'|format(s.target_weight or 0) }}</td><td>{{ '%.2f'|format(s.reference_price or 0) }}</td>
-          <td>{{ 'yes' if s.selected else 'no' }}</td></tr>
-      {% else %}<tr><td colspan="6" class="muted">No signals for today.</td></tr>{% endfor %}
+      <tr>
+        <td>{{ today.index }}</td>
+        <td class="mono-sm">{{ today.date }}</td>
+        <td>{{ today.trade_slot }}</td>
+        <td><span class="pill {{ 'pill-open' if today.status=='Open' else 'pill-muted' }}">{{ today.status }}</span></td>
+        <td class="center">{% if today.trade_opened %}<span class="check">✓</span>{% else %}—{% endif %}</td>
+        <td class="num">{{ today.open_legs }}</td>
+        <td class="num">{{ '%.2f'|format(today.investment_rs) }}</td>
+        <td class="num {{ 'pos-cell' if today.today_mtm>=0 else 'neg-cell' }}"><strong>{{ '%.2f'|format(today.today_mtm) }}</strong></td>
+        <td class="num {{ 'pos-cell' if today.realized_rs>=0 else 'neg-cell' }}"><strong>{{ '%.2f'|format(today.realized_rs) }}</strong></td>
+        <td class="num {{ 'pos-cell' if today.open_unrealized_pnl>=0 else 'neg-cell' }}"><strong>{{ '%.2f'|format(today.open_unrealized_pnl) }}</strong></td>
+        <td class="num {{ 'pos-cell' if today.return_pct>=0 else 'neg-cell' }}"><strong>{{ '%.2f'|format(today.return_pct) }}%</strong></td>
+        <td>{{ today.exit_type }}</td>
+        <td class="mono-sm">{{ today.marked_at }}</td>
+      </tr>
     </tbody>
   </table>
 
+  {# ---------- CHARTS ---------- #}
   <div class="charts">
-    <div id="chart-daily"></div>
-    <div id="chart-cum"></div>
+    <div>
+      <div class="chart-title">Daily Paper P&amp;L</div>
+      <div id="chart-daily" class="chart-canvas"></div>
+    </div>
+    <div>
+      <div class="chart-title">Cumulative Paper P&amp;L</div>
+      <div id="chart-cum" class="chart-canvas"></div>
+    </div>
   </div>
 
-  <h3>Current Paper Book</h3>
-  <table class="data">
-    <thead><tr><th>Symbol</th><th>Qty</th><th>Avg Cost</th><th>Cost Basis</th><th>Updated</th></tr></thead>
+  {# ---------- PERFORMANCE SUMMARY ---------- #}
+  <h3 class="section-title">Performance Summary</h3>
+  <div class="perf-grid">
+    {% for col in perf %}
+    <div class="perf-col">
+      <table class="data">
+        <thead><tr><th>Metric</th><th>Value</th></tr></thead>
+        <tbody>
+          {% for row in col %}
+          <tr><td>{{ row.metric }}</td><td class="num">{{ row.value }}</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endfor %}
+  </div>
+
+  {# ---------- CURRENT PAPER BOOK ---------- #}
+  <h3 class="section-title">Current Paper Book</h3>
+  <p class="muted" style="margin: 0 0 6px;">This table shows the actual open paper holdings after all recorded paper exits/adds have been applied.</p>
+  <table class="data book-table">
+    <thead>
+      <tr>
+        <th>Signal At</th><th>Trade At</th><th>Symbol</th><th>Qty</th><th>Avg Cost</th>
+        <th>Cost Basis</th><th>Marked Price</th><th>Market Value</th>
+        <th>Unrealized PnL</th><th>Unrealized PnL %</th><th>Marked At</th>
+      </tr>
+    </thead>
     <tbody>
       {% for b in book %}
-      <tr><td>{{ b.symbol }}</td><td>{{ b.qty }}</td><td>{{ '%.2f'|format(b.avg_cost) }}</td>
-          <td>{{ '%.2f'|format(b.cost_basis) }}</td><td>{{ b.updated_at }}</td></tr>
-      {% else %}<tr><td colspan="5" class="muted">Empty.</td></tr>{% endfor %}
+      <tr>
+        <td class="mono-sm">{{ b.signal_at }}</td>
+        <td class="mono-sm">{{ b.trade_at }}</td>
+        <td class="mono"><strong>{{ b.symbol }}</strong></td>
+        <td class="num">{{ b.qty }}</td>
+        <td class="num">{{ '%.2f'|format(b.avg_cost) }}</td>
+        <td class="num">{{ '%.2f'|format(b.cost_basis) }}</td>
+        <td class="num">{{ '%.2f'|format(b.marked_price) }}{% if b.is_stale %}<span class="muted" title="No live LTP yet; using last known fill price.">*</span>{% endif %}</td>
+        <td class="num">{{ '%.2f'|format(b.market_value) }}</td>
+        <td class="num {{ 'pos-cell' if b.unrealized_pnl>=0 else 'neg-cell' }}"><strong>{{ '%.2f'|format(b.unrealized_pnl) }}</strong></td>
+        <td class="num {{ 'pos-cell' if b.unrealized_pnl_pct>=0 else 'neg-cell' }}"><strong>{{ '%.2f'|format(b.unrealized_pnl_pct) }}%</strong></td>
+        <td class="mono-sm">{{ b.marked_at }}</td>
+      </tr>
+      {% else %}<tr><td colspan="11" class="muted">No open paper positions.</td></tr>{% endfor %}
     </tbody>
   </table>
 
-  <h3>Recent Fills</h3>
-  <table class="data">
-    <thead><tr><th>Date</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Price</th><th>Charges</th><th>Non-broker</th></tr></thead>
-    <tbody>
-      {% for f in fills %}
-      <tr><td>{{ f.session_date }}</td><td>{{ f.symbol }}</td><td>{{ f.side }}</td><td>{{ f.fill_qty }}</td>
-          <td>{{ '%.2f'|format(f.fill_price) }}</td><td>{{ '%.2f'|format(f.charges_total) }}</td>
-          <td>{{ '%.2f'|format(f.non_broker_charges or 0) }}</td></tr>
-      {% else %}<tr><td colspan="7" class="muted">No fills yet.</td></tr>{% endfor %}
-    </tbody>
-  </table>
+  {# ---------- TRADE LOG ---------- #}
+  <div class="section-head-row">
+    <h3 class="section-title">Trade log</h3>
+    <a class="btn btn-sm" href="/paper/export/trade-log.csv">Export trade logs</a>
+  </div>
+
+  {% for group in trade_log %}
+  <details class="trade-group" {% if loop.first %}open{% endif %}>
+    <summary>
+      <span class="trade-group-title">{{ group.label }}</span>
+      <span class="muted" style="margin-left:16px;">Portfolio value:</span>
+      <strong class="pos">{{ group.portfolio_value_str }}</strong>
+    </summary>
+    <table class="data trade-log-table">
+      <thead>
+        <tr>
+          <th>Symbol</th><th>Entry At</th><th>Exit At</th><th>Fill Price</th>
+          <th>Order Quantity</th><th>Fill Quantity</th><th>Profit / Loss</th>
+          <th>Returns</th><th>Non broker charge</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in group.rows %}
+        <tr>
+          <td>
+            <span class="sym mono"><strong>{{ r.symbol }}</strong></span><br>
+            <span class="badge badge-rebalance">{{ r.badge }}</span>
+            <span class="badge badge-side {{ 'badge-buy' if r.side=='BUY' else 'badge-sell' }}">{{ 'B' if r.side=='BUY' else 'S' }}</span>
+            <span class="badge badge-kind {{ 'badge-new' if r.kind=='New Entry' else 'badge-exit' }}">{{ r.kind }}</span>
+          </td>
+          <td class="mono-sm">{{ r.entry_at }}</td>
+          <td class="mono-sm">{{ r.exit_at }}</td>
+          <td class="num">Rs {{ '%.2f'|format(r.fill_price) }}</td>
+          <td class="num">{{ r.order_qty }}</td>
+          <td class="num">{{ r.fill_qty }}</td>
+          <td class="num {{ 'pos' if (r.profit_loss or 0)>=0 else 'neg' }}">
+            {% if r.profit_loss is none %}—{% else %}<strong>Rs {{ '%.2f'|format(r.profit_loss) }}</strong>{% endif %}
+          </td>
+          <td class="num {{ 'pos' if (r.returns_pct or 0)>=0 else 'neg' }}">
+            {% if r.returns_pct is none %}—{% else %}<strong>{{ '%.2f'|format(r.returns_pct) }}%</strong>{% endif %}
+          </td>
+          <td class="num">{% if r.non_broker_charges is none %}—{% else %}Rs {{ '%.2f'|format(r.non_broker_charges) }}{% endif %}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </details>
+  {% else %}
+  <p class="muted">No paper trades yet.</p>
+  {% endfor %}
 </section>
 
 <script>
 (function() {
   const pts = {{ pnl_series|tojson }};
   const x = pts.map(p => p.session_date);
-  const daily = pts.map(p => p.mtm - (p.realized - 0));
+  const daily = pts.map(p => p.mtm);
+  const dailyColors = daily.map(v => v >= 0 ? "#059669" : "#dc2626");
+  const layoutCommon = {
+    margin: {t: 8, r: 8, b: 40, l: 48},
+    paper_bgcolor: "#ffffff",
+    plot_bgcolor: "#ffffff",
+    font: {family: "-apple-system, Segoe UI, Helvetica, Arial, sans-serif", size: 11, color: "#374151"},
+    xaxis: {title: {text: "Date"}, tickfont: {size: 10}, gridcolor: "#f3f4f6"},
+    yaxis: {title: {text: "P&L, Rs"}, tickfont: {size: 10}, gridcolor: "#f3f4f6"},
+  };
   Plotly.newPlot("chart-daily",
-    [{x, y: pts.map(p => p.mtm), type: "scatter", mode: "lines+markers", name: "Daily MTM"}],
-    {title: "Daily Paper P&L", margin: {t: 30}});
+    [{x, y: daily, type: "scatter", mode: "markers+lines", name: "Daily",
+      marker: {color: dailyColors, size: 8}, line: {color: "#94a3b8", width: 1}}],
+    Object.assign({}, layoutCommon, {yaxis: Object.assign({}, layoutCommon.yaxis, {title: {text: "P&L, Rs"}})}),
+    {displayModeBar: false, responsive: true});
   const cum = [];
   let acc = 0;
   for (const p of pts) { acc += p.mtm; cum.push(acc); }
+  const cumColors = cum.map(v => v >= 0 ? "#059669" : "#dc2626");
   Plotly.newPlot("chart-cum",
-    [{x, y: cum, type: "scatter", mode: "lines+markers", name: "Cumulative"}],
-    {title: "Cumulative Paper P&L", margin: {t: 30}});
+    [{x, y: cum, type: "scatter", mode: "markers+lines", name: "Cumulative",
+      marker: {color: cumColors, size: 8}, line: {color: "#94a3b8", width: 1}}],
+    Object.assign({}, layoutCommon, {yaxis: Object.assign({}, layoutCommon.yaxis, {title: {text: "Cumulative P&L, Rs"}})}),
+    {displayModeBar: false, responsive: true});
 })();
 </script>
 {% endblock %}

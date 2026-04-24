@@ -59,12 +59,28 @@ async def test_validate_token_401():
 
 
 @pytest.mark.asyncio
-async def test_market_status_parsing():
-    async with respx.mock(base_url=BASE, assert_all_called=False) as m:
-        m.get("/marketfeed/marketstatus").mock(return_value=httpx.Response(200, json={"status": "open"}))
-        c = DhanClient(BASE, "cid", "tok")
-        assert await c.market_status() == "OPEN"
-        await c.close()
+async def test_market_status_uses_ist_clock_fallback(monkeypatch):
+    """Dhan retired /marketfeed/marketstatus; market_status now derives
+    OPEN/CLOSED from a local IST weekday + market-hours check. FRD B.5."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    ist = ZoneInfo("Asia/Kolkata")
+    c = DhanClient(BASE, "cid", "tok")
+
+    # Wednesday 10:00 IST — market open.
+    monkeypatch.setattr("app.time_utils.now_ist", lambda: datetime(2026, 4, 22, 10, 0, tzinfo=ist))
+    assert await c.market_status() == "OPEN"
+
+    # Wednesday 18:00 IST — after-hours.
+    monkeypatch.setattr("app.time_utils.now_ist", lambda: datetime(2026, 4, 22, 18, 0, tzinfo=ist))
+    assert await c.market_status() == "CLOSED"
+
+    # Saturday 10:00 IST — weekend.
+    monkeypatch.setattr("app.time_utils.now_ist", lambda: datetime(2026, 4, 25, 10, 0, tzinfo=ist))
+    assert await c.market_status() == "CLOSED"
+
+    await c.close()
 
 
 @pytest.mark.asyncio

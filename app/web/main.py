@@ -12,8 +12,11 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import uvicorn
+import csv
+import io
+
 from fastapi import FastAPI, Form, HTTPException, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -82,14 +85,100 @@ def create_app() -> FastAPI:
             sess = session_date_for(now_ist())
             ctx.update(
                 {
-                    "summary": views.paper_summary(conn),
+                    "summary": views.paper_summary_rich(conn),
                     "signals": views.signals_for(conn, sess),
-                    "book": views.paper_book_rows(conn),
+                    "signals_brief": views.signals_today_brief(conn, sess),
+                    "book": views.paper_book_rich(conn),
                     "pnl_series": views.pnl_timeseries(conn, "paper"),
                     "fills": views.recent_fills(conn, "paper"),
+                    "meta": views.paper_meta(conn, sess),
+                    "today": views.today_status(conn, sess),
+                    "perf": views.performance_summary(conn),
+                    "trade_log": views.day_grouped_trade_log(conn),
                 }
             )
             return templates.TemplateResponse(request, "paper.html", ctx)
+        finally:
+            conn.close()
+
+    @app.get("/paper/export/trade-log.csv")
+    async def export_trade_log():
+        """Export the full paper trade log as CSV (all sessions)."""
+        conn = connect()
+        try:
+            groups = views.day_grouped_trade_log(conn, limit_days=10_000)
+        finally:
+            conn.close()
+        buf = io.StringIO()
+        w = csv.writer(buf)
+        w.writerow([
+            "session_date", "symbol", "side", "kind", "entry_at", "exit_at",
+            "fill_price", "order_qty", "fill_qty", "profit_loss", "returns_pct",
+            "non_broker_charges", "portfolio_value",
+        ])
+        for g in groups:
+            for r in g["rows"]:
+                w.writerow([
+                    g["session_date"], r["symbol"], r["side"], r["kind"],
+                    r["entry_at"], r["exit_at"], r["fill_price"], r["order_qty"],
+                    r["fill_qty"], r["profit_loss"] if r["profit_loss"] is not None else "",
+                    r["returns_pct"] if r["returns_pct"] is not None else "",
+                    r["non_broker_charges"] if r["non_broker_charges"] is not None else "",
+                    g["portfolio_value"],
+                ])
+        return Response(content=buf.getvalue(), media_type="text/csv",
+                        headers={"Content-Disposition": "attachment; filename=paper-trade-log.csv"})
+
+    @app.get("/overview", response_class=HTMLResponse)
+    async def overview(request: Request):
+        """Portfolio-level summary: tiles for paper + live side by side,
+        recent alerts, worker status. Reuses existing read-model."""
+        conn = connect()
+        try:
+            ctx = _context(request)
+            sess = session_date_for(now_ist())
+            ctx.update(
+                {
+                    "paper_summary": views.paper_summary_rich(conn),
+                    "live_summary": views.live_summary(conn),
+                    "today": views.today_status(conn, sess),
+                }
+            )
+            return templates.TemplateResponse(request, "overview.html", ctx)
+        finally:
+            conn.close()
+
+    @app.get("/trades", response_class=HTMLResponse)
+    async def trades(request: Request):
+        """All paper + live fills in one place, newest-first."""
+        conn = connect()
+        try:
+            ctx = _context(request)
+            ctx.update(
+                {
+                    "paper_fills": views.recent_fills(conn, "paper", limit=500),
+                    "live_fills": views.recent_fills(conn, "live", limit=500),
+                }
+            )
+            return templates.TemplateResponse(request, "trades.html", ctx)
+        finally:
+            conn.close()
+
+    @app.get("/config", response_class=HTMLResponse)
+    async def config_tab(request: Request):
+        """Read-only view of the Champion B strategy config + state paths."""
+        from app import paths as _paths
+        conn = connect()
+        try:
+            ctx = _context(request)
+            ctx.update(
+                {
+                    "state_dir": str(_paths.state_dir()),
+                    "db_path": str(_paths.db_file()),
+                    "universe_csv": str(_paths.state_dir() / "universe" / "universe.csv"),
+                }
+            )
+            return templates.TemplateResponse(request, "config.html", ctx)
         finally:
             conn.close()
 

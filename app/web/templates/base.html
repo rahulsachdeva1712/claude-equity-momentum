@@ -11,12 +11,17 @@
 <body>
   {% include "partials/top_bar.html" %}
 
-  <nav class="tabs">
-    <a href="/paper" class="{% if request.url.path == '/paper' %}active{% endif %}">Paper Trading</a>
-    <a href="/live" class="{% if request.url.path == '/live' %}active{% endif %}">Live Trading</a>
-  </nav>
-
   <main>
+    <h1 class="app-title">Equity Momentum Rebalance Backtester</h1>
+
+    <nav class="tabs">
+      <a href="/overview" class="{% if request.url.path == '/overview' %}active{% endif %}">Overview</a>
+      <a href="/trades"   class="{% if request.url.path == '/trades'   %}active{% endif %}">Trades</a>
+      <a href="/paper"    class="{% if request.url.path == '/paper'    %}active{% endif %}">Paper Trading</a>
+      <a href="/live"     class="{% if request.url.path == '/live'     %}active{% endif %}">Live Trading</a>
+      <a href="/config"   class="{% if request.url.path == '/config'   %}active{% endif %}">Config</a>
+    </nav>
+
     {% block content %}{% endblock %}
   </main>
 

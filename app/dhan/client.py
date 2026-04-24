@@ -25,7 +25,6 @@ log = logging.getLogger("dhan")
 
 _PATHS = {
     "fund_limit": "/fundlimit",
-    "market_status": "/marketfeed/marketstatus",
     "historical_daily": "/charts/historical",
     "intraday": "/charts/intraday",
     "place_order": "/orders",
@@ -99,13 +98,18 @@ class DhanClient:
             return False
 
     async def market_status(self) -> str:
-        """Returns 'OPEN', 'CLOSED', or raw string as given by Dhan.
-        Caller interprets any value other than 'OPEN' as closed.
+        """Returns 'OPEN' during IST weekday market hours, 'CLOSED' otherwise.
+
+        Dhan retired the `/v2/marketfeed/marketstatus` endpoint with no
+        drop-in replacement in the v2 docs, so this falls back to a local
+        IST-clock + weekday check. This matches FRD B.5's "no pre-baked
+        holiday calendar" constraint: holidays that fall on weekdays will
+        read 'OPEN' here, but downstream safety gates (intraday candle
+        fetch, order placement) fail-close on non-trading days.
         """
-        data = await self._request("GET", _PATHS["market_status"])
-        # Dhan wraps results in either 'data' or top-level; accept either.
-        status = data.get("status") or (data.get("data") or {}).get("status") or ""
-        return str(status).upper()
+        from app.time_utils import is_market_hours
+
+        return "OPEN" if is_market_hours() else "CLOSED"
 
     async def historical_daily(
         self,

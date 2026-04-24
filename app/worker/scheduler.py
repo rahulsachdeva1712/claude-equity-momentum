@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime, timedelta
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -12,11 +13,14 @@ from app.time_utils import IST
 from app.worker.jobs import (
     command_inbox_job,
     execution_job,
+    ltp_poll_job,
     market_status_poll_job,
     recon_job,
     token_expiry_monitor_job,
     token_watcher_job,
+    universe_refresh_job,
 )
+from app.universe.refresh import universe_csv_path
 
 log = logging.getLogger("scheduler")
 
@@ -55,10 +59,37 @@ def build_scheduler(dhan: DhanClient) -> AsyncIOScheduler:
         market_status_poll_job, CronTrigger(second="*/30", timezone=IST),
         args=(dhan,), id="market_status", coalesce=True, max_instances=1,
     )
+    # Per-position LTP poll for the paper tab's Marked Price column. Runs
+    # every 60s during market hours only (outside market hours, Dhan returns
+    # stale candles and the UI's "stale" marker handles that). Written to
+    # the `live_ltp` table; read by views.paper_book_rich.
+    scheduler.add_job(
+        ltp_poll_job, CronTrigger(day_of_week="mon-fri", hour="9-15", minute="*", timezone=IST),
+        args=(dhan,), id="ltp_poll", coalesce=True, max_instances=1,
+    )
     # Command inbox poll (FRD B.2). 2-second cadence; matches the doc's
     # "2-second cadence from worker" note for UI → worker signalling.
     scheduler.add_job(
         command_inbox_job, CronTrigger(second="*/2", timezone=IST),
         args=(dhan,), id="command_inbox", coalesce=True, max_instances=1,
     )
+    # Daily universe refresh (FRD A.2, B.5). 18:00 IST Mon-Fri — well after
+    # BSE's 15:30 close and the ~16:30 IST bhavcopy publish. Downloads the
+    # BSE bhavcopy, applies the Champion B universe filter (series +
+    # 20-day ADV >= 10k shares), joins to a cached Dhan scrip master on
+    # ISIN, and writes <state_dir>/universe/universe.csv. This is the
+    # artifact the CsvUniverseProvider reads at the 09:30 execution job.
+    scheduler.add_job(
+        universe_refresh_job, CronTrigger(day_of_week="mon-fri", hour=18, minute=0, timezone=IST),
+        id="universe_refresh", misfire_grace_time=3600, coalesce=True, max_instances=1,
+    )
+    # One-shot refresh on worker startup if the artifact is missing, so a
+    # freshly installed app has something to trade with on day one rather
+    # than silently running with an empty universe.
+    if not universe_csv_path().exists():
+        scheduler.add_job(
+            universe_refresh_job,
+            next_run_time=datetime.now(IST) + timedelta(seconds=5),
+            id="universe_refresh_bootstrap", max_instances=1,
+        )
     return scheduler

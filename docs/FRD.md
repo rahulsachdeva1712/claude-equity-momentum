@@ -1,7 +1,7 @@
 # Equity Momentum Rebalance — Functional Requirements Document
 
 Living document. Source of truth going forward.
-Last updated: 2026-04-24 (Champion B baseline rollout).
+Last updated: 2026-04-24 (Champion B baseline rollout + dynamic universe refresh).
 
 This FRD has two parts:
 - **Part A — Strategy Specification.** Originally imported verbatim from `Equity_Momentum_App_FRD.docx` (dated 2026-04-22). Amended in-place since then; see B.16 Change Log for each strategy-rule change and its driver. Describes the trading rules only.
@@ -24,9 +24,10 @@ Equity Momentum Rebalance Strategy. Originally code-derived from the repository 
 ## A.2 Universe Definition
 - Universe name in code: `all_bse_equities`.
 - Exchange scope: BSE only.
+- Membership rule (Champion B, matches the 2-year backtest): BSE main-board equity (`series` in `{A, B, T, X, XT}`) with 20-day average daily volume `>= 10,000 shares`. No market-cap floor (the BSE bhavcopy used in the backtest carries no market-cap data, so Champion B was validated without any mcap gate — the live app matches that universe).
+- Membership is refreshed nightly by the worker's universe-refresh job (B.5): it downloads the most recent BSE bhavcopy window, applies the series + ADV filter, joins on ISIN against a cached Dhan scrip-master snapshot to attach `security_id` and `exchange_segment = BSE_EQ`, and atomically writes `<state_dir>/universe/universe.csv`. Strategy and paper/live modules read that file through `CsvUniverseProvider`; a symbol absent from the scrip master is dropped (no `security_id` → cannot place orders).
 - A symbol must have daily OHLCV data available to participate.
 - A symbol must have the configured ranking metric and weighting metric available for the signal date to remain eligible.
-- A symbol must have a usable `market_cap_cr` value to pass the active market-cap filter.
 - A symbol must have 09:25–09:30 IST one-minute candle data available on the signal date to evaluate the intraday volume filter.
 
 ## A.3 Strategy Inputs And Derived Metrics
@@ -69,7 +70,9 @@ Equity Momentum Rebalance Strategy. Originally code-derived from the repository 
 | Maximum positions | 20 |
 | Minimum positions | 1 |
 | Full rebalance | True |
-| Market-cap threshold | 100.0 crore |
+| Market-cap threshold | disabled by default (`use_mcap_filter = False`; Champion B match). Value retained in config as `market_cap_min_cr = 100.0` for one-flag re-enable. |
+| Universe series filter | `series in {A, B, T, X, XT}` (BSE main-board equity) |
+| Universe ADV floor | `adv_20d >= 10,000` shares, computed over the 20-day bhavcopy window |
 | Breadth threshold | 0.0, therefore breadth gate disabled |
 | Use intraday volume filter | True |
 | Intraday volume operator and threshold | `vol_0925_0930 >= 1000` shares |
@@ -79,7 +82,7 @@ Equity Momentum Rebalance Strategy. Originally code-derived from the repository 
 | Explicit transaction cost | 10 basis points |
 
 ## A.5 Active Filters
-- Market-cap filter: `market_cap_cr >= 100.0`.
+- Universe construction (applied nightly by the refresh job, not per-signal): `series in {A, B, T, X, XT}` and `adv_20d >= 10,000` shares. Symbols failing either never appear in `universe.csv` and so cannot be selected.
 - Trend filter 1: `close > EMA(21)`.
 - Trend filter 2: `EMA(21) > EMA(50)`.
 - Momentum filter: `RSI(14) >= 88`.
@@ -88,11 +91,11 @@ Equity Momentum Rebalance Strategy. Originally code-derived from the repository 
 - Breadth gate: configured in code but inactive because `breadth_threshold = 0.0`.
 - MFI gate: configured in code but inactive because `use_mfi_filter = False`.
 - CCI gate: configured in code but inactive because `use_cci_filter = False`.
+- Market-cap gate: configured in code (`market_cap_min_cr = 100.0`) but inactive because `use_mcap_filter = False` — Champion B was validated without it. Re-enable by flipping the flag.
 
 ## A.6 Entry Criteria
 A stock becomes a long candidate for a signal date only if all of the following are true on that date:
-- The stock belongs to the `all_bse_equities` universe and has usable daily data.
-- `market_cap_cr >= 100.0`.
+- The stock belongs to the `all_bse_equities` universe (series + ADV filter applied nightly per A.2) and has usable daily data.
 - `close > EMA(21)`.
 - `EMA(21) > EMA(50)`.
 - `RSI(14) >= 88`.
@@ -137,7 +140,7 @@ A stock can effectively lose its place in the portfolio because it fails the act
 - The strategy is long-only.
 - The strategy is daily only and does not include intraday entry logic.
 - There is no hard stop-loss, take-profit, trailing stop, or hedge overlay in the strategy code.
-- The market-cap filter uses current-state market-cap data rather than point-in-time historical market-cap snapshots.
+- The universe is computed from the latest BSE bhavcopy window (see A.2). `adv_20d` is a trailing 20-day average, so a symbol briefly spiking into or out of liquidity can enter or leave the universe one session behind. This matches how the Champion B backtest was constructed.
 - Integer-share sizing and trading-cost deductions can cause actual realized weights to differ from ideal target weights.
 - The `next_day_0930` execution model used for offline strategy validation matches live semantics (signal on D close, fill at D+1 09:30 close). When the validation harness is driven by daily bhavcopy data only — which has no intraday prices — the fill is approximated by the D+1 open. Typical open-vs-09:30 slippage on liquid BSE names is a few tens of bps; this is a documented approximation, not a property of the strategy.
 
@@ -212,7 +215,7 @@ Historical OHLCV is **not** persisted. Each 09:30 run fetches the required daily
 
 ## B.5 Market Calendar and Scheduler
 
-- No pre-baked holiday calendar. Source of truth for "is the market open today" is Dhan's market-status API, queried at each scheduled trigger.
+- No pre-baked holiday calendar. Market-status was originally sourced from Dhan's `/v2/marketfeed/marketstatus` endpoint, but Dhan retired it with no v2 replacement. The worker now derives OPEN/CLOSED from a local IST weekday + market-hours check (`app.time_utils.is_market_hours`). Downstream safety gates (intraday candle fetch, order placement) fail-close on non-trading weekdays, so a holiday is caught at execution time even though the pill reads `OPEN`.
 - APScheduler runs inside the worker with IST timezone.
 - Daily jobs:
   - **09:30 IST — Signal + Execution job (single consolidated run).** Query Dhan market-status. If closed, log and exit. Otherwise:
@@ -227,8 +230,9 @@ Historical OHLCV is **not** persisted. Each 09:30 run fetches the required daily
   The 09:10 pre-market signal job no longer exists. All signal computation happens inside this 09:30 job because the intraday volume gate is a same-session measurement; there is no stable, pre-market form of the target set to surface.
 - Live reconciliation loop: every 15 seconds during market hours (09:15–15:30 IST), the worker pulls Dhan positions and order book, filters to our `correlation_id` tags, updates `live_positions_snapshot` and `live_pnl_daily`. Outside market hours the loop is idle.
 - Token expiry watcher: every 60 seconds, re-parse `exp`, raise alerts at the 60-min and 10-min thresholds, disable live trading if expired.
-- Market-status poller: every 30 seconds, the worker queries Dhan `/marketfeed/marketstatus` and writes the uppercased value to `settings.market_status` with `updated_at = now_ist()`. Transport errors are swallowed so the row's `updated_at` naturally ages out. The web process reads this row for the top-bar pill — FRD B.2 forbids web-side Dhan calls, so the worker is the sole writer. Rows older than 90 seconds (3 × cadence) render as `unknown` on the pill.
+- Market-status poller: every 30 seconds, the worker calls `DhanClient.market_status()` and writes the result to `settings.market_status` with `updated_at = now_ist()`. Since Dhan retired `/v2/marketfeed/marketstatus`, that method now returns `OPEN` during IST weekday market hours (09:15–15:30) and `CLOSED` otherwise; no HTTP call is made. The web process reads this row for the top-bar pill — FRD B.2 forbids web-side Dhan calls, so the worker remains the sole writer. Rows older than 90 seconds (3 × cadence) render as `unknown` on the pill, which now signals "worker down" rather than "Dhan API outage."
 - Command inbox poller: every 2 seconds, the worker scans `run/commands/*.now`. Currently one recognised command — `run_rebalance.now` — which the web process drops in response to the "Run rebalance now" UI button. The worker consumes the file, enforces the B.13 idempotency guard (reject if `sessions.execution_completed_at` is set), discards files older than 300 seconds as stale, and runs `execution_job` out-of-band. All other market-status / kill-switch / token safety gates still apply. Unknown command filenames are logged and removed.
+- **18:00 IST — Universe refresh job (Mon-Fri, `misfire_grace_time=3600`).** The worker's `universe_refresh_job` calls `app.universe.refresh.refresh_universe`, which: (1) downloads the BSE bhavcopy for each weekday in the trailing ~35-day window into `<state_dir>/universe/bhavcopy/`, tolerating weekend/holiday 404s and both the modern CSV and legacy ZIP formats; (2) ensures `<state_dir>/universe/scrip_master.csv` is fresh (re-download if >7d old) from Dhan's public scrip master; (3) filters bhavcopy rows to `series in {A, B, T, X, XT}` and computes per-symbol 20-day ADV, keeping rows with `adv_20d >= 10,000`; (4) inner-joins on ISIN to attach `security_id` and `exchange_segment = BSE_EQ`; (5) writes `<state_dir>/universe/universe.csv` atomically (temp + rename); (6) stamps `settings.universe_refresh_at`, `settings.universe_count`, `settings.universe_source_date`. The job never crashes the scheduler — failures raise an `error` alert and the strategy keeps reading the previous artifact. On fresh install (no `universe.csv` present at worker start) the scheduler registers a one-shot bootstrap run 5 seconds after start-up.
 - Catch-up behavior: if the worker is not running at 09:30, the job does not run retroactively. On next start, UI shows "Missed today's execution" alert. No auto-catch-up, because both the intraday volume window and the specified 09:30-close fill price are session-time artifacts that cannot be reconstructed later.
 
 ## B.6 Paper Trading Module
@@ -442,5 +446,7 @@ Mandatory alert sources:
 | 2026-04-24 | Moved `.env` from the state directory (`~/.claude-equity-momentum/.env`) to the project root (`<repo>/.env`, still gitignored). Runtime state — SQLite db, logs, pid files, artifacts — remains under the state directory. `app/paths.py` gains `project_root()` and `env_file()` now returns `project_root() / '.env'`; `app/settings.py`, `run.bat`, `run.sh`, `README.md`, and B.2 / B.4 / B.10 updated to match. Rationale: users edit `.env` by hand to paste the daily Dhan access token, so keeping it next to the source tree makes it discoverable in an IDE and matches the convention most Python projects follow. | User-reported confusion: token pasted into `<repo>/.env` was not being read because the code looked at the state-dir `.env`. |
 | 2026-04-24 | Wired the top-bar market-status pill. A new `market_status_poll_job` runs every 30 s in the worker, calls Dhan `/marketfeed/marketstatus`, and writes the uppercased result to the `settings` table (`key='market_status'`, `updated_at = now_ist()`). The web process reads this row via `views._read_market_status(conn)` and renders the value on the pill; rows older than 90 s (3 × cadence) or transport errors fall back to `unknown`. No Dhan calls from the web side (preserves the B.2 single-writer rule). Added `app/web/main.py` wiring, `tests/test_market_status_job.py`, and top-bar rendering tests in `tests/test_web.py`. B.5 updated with the new poll cadence. Also fixed `tests/test_settings_env.py` (stale after the `.env` relocation) so the full suite is green. | User-reported: top-bar pill always showed `market: unknown` because the previous scaffold passed a hardcoded `None`. |
 | 2026-04-24 | Wired the "Run rebalance now" manual trigger. UI gains a button on both tabs; `POST /actions/run-rebalance` touches `run/commands/run_rebalance.now` and redirects back. New worker job `command_inbox_job` polls the inbox every 2 s, enforces the B.13 idempotency guard (rejects with alert if `sessions.execution_completed_at` is already set), discards sentinels older than 300 s, runs `execution_job` out-of-band, and deletes the file before invoking the job so crashes don't loop-retry. Unknown filenames are logged + removed. Web process never calls the execution path directly (preserves B.2 single-writer rule). Updated B.5 (new poller), B.13 (idempotency + manual-trigger note), added `tests/test_command_inbox.py`. Full suite 102/102 green. | User-reported: no way to trigger a rebalance off-schedule for testing, and today's 09:30 slot had been missed because the worker was down. |
+| 2026-04-24 | Wired the dynamic universe refresh so live/paper trade the exact universe the Champion B backtest was validated on. New `app/universe/` package (`bhavcopy.py`, `scrip_master.py`, `refresh.py`) downloads the BSE bhavcopy window, caches Dhan's scrip master, applies `series in {A,B,T,X,XT}` + `adv_20d >= 10,000`, joins on ISIN to attach `security_id`, and atomically writes `<state_dir>/universe/universe.csv`. `CsvUniverseProvider` now reads that path (schema gained `isin`, `sc_code`; legacy 4-column CSVs still load). Scheduler registers a nightly 18:00 IST run (Mon-Fri) plus a 5-second bootstrap one-shot when the artifact is missing. Added `StrategyConfig.use_mcap_filter` (default `False` to match Champion B; `market_cap_min_cr` retained for one-flag re-enable); `_static_eligible_mask` and `compute_universe_metrics` now gate the mcap check on this flag, and the panel no longer needs a `market_cap_cr` column when the gate is off. Updated A.2, A.4, A.5, A.6, A.11, B.5. New tests: `tests/test_universe_bhavcopy.py`, `tests/test_universe_scrip_master.py`, `tests/test_universe_refresh.py`, `tests/test_universe_provider.py`; strategy tests updated to exercise both default-off and opted-in mcap-gate behavior. Full suite 138/138 green. | Close the loop on the Champion B rollout: backtest used a bhavcopy-derived universe (no mcap filter, series+ADV only), live app was still pointing at a hand-written CSV with a 100-cr mcap floor, so the two universes disagreed. |
+| 2026-04-24 | Dhan retired `/v2/marketfeed/marketstatus` (started returning 404); the v2 docs no longer list any replacement endpoint. `DhanClient.market_status()` now computes OPEN/CLOSED locally from an IST weekday + market-hours check (`is_market_hours()`), with no HTTP call. `_PATHS["market_status"]` removed. The `market_status_poll_job` keeps its 30 s cadence and continues to write to `settings.market_status`; a stale row still falls back to `unknown` on the pill (now meaning "worker down" rather than "Dhan outage"). Holidays that fall on weekdays will read `OPEN` here, but downstream safety gates (intraday candle fetch, order placement) fail-close on non-trading days, so the blast radius is limited to wasted fetches. B.5 updated; `tests/test_market_status_job.py` and `tests/test_dhan_client.py::test_market_status_*` rewritten to freeze IST time instead of mocking HTTP. | Dhan retired the market-status endpoint; the poller was 404-ing every 30 s, leaving the top-bar pill stuck at `unknown`. |
 
 Future edits to this FRD must add a row above with the date, the change summary, and the driver.

@@ -77,7 +77,13 @@ def test_trending_up_stock_gets_selected_over_flat():
     # Pass the intraday volume gate (FRD A.5) with a value well above the
     # 1000-share threshold for each symbol.
     volumes = {"STRONG": 50_000.0, "FLAT": 50_000.0, "SMALLCAP": 50_000.0}
-    ts = build_target_set(metrics, signal_day.date(), capital=1_000_000.0, intraday_volumes=volumes)
+    # Champion B ships with the market-cap filter OFF by default (bhavcopy
+    # carries no mcap, so the backtested universe had no mcap gate). Enable
+    # it here to assert the gate still works when turned on.
+    cfg = StrategyConfig(use_mcap_filter=True)
+    ts = build_target_set(
+        metrics, signal_day.date(), capital=1_000_000.0, cfg=cfg, intraday_volumes=volumes
+    )
     selected = [r.symbol for r in ts.selected()]
     assert "STRONG" in selected
     assert "SMALLCAP" not in selected  # market_cap filter
@@ -109,17 +115,19 @@ def test_weights_sum_to_one_and_qty_fits_capital():
 
 def test_empty_when_none_eligible():
     n = 300
-    # Both below market cap threshold
+    # Both below market cap threshold. With use_mcap_filter=True both are
+    # ineligible; Champion B's default (mcap off) would accept them.
+    cfg = StrategyConfig(use_mcap_filter=True)
     closes = np.array([100.0 * (1.005 ** i) for i in range(n)])
     panel = _build_panel(
         {"A": closes, "B": closes},
         start=date(2025, 1, 1),
         market_caps={"A": 10.0, "B": 20.0},
     )
-    metrics = compute_universe_metrics(panel)
+    metrics = compute_universe_metrics(panel, cfg)
     d = pd.Timestamp(date(2025, 1, 1) + timedelta(days=n - 1)).date()
     ts = build_target_set(
-        metrics, d, capital=1_000_000.0,
+        metrics, d, capital=1_000_000.0, cfg=cfg,
         intraday_volumes={"A": 50_000.0, "B": 50_000.0},
     )
     assert ts.selected() == ()
@@ -200,19 +208,62 @@ def test_volume_filter_disabled_via_config_bypasses_gate():
     assert {r.symbol for r in ts.selected()} == {"A"}
 
 
+def test_mcap_filter_off_by_default_admits_small_cap():
+    """Champion B baseline: ``use_mcap_filter=False``. A stock that fails
+    the 100-cr floor under the legacy config should still be selected in
+    the Champion B default. Also the panel doesn't need a market_cap_cr
+    column at all when the gate is off.
+    """
+    n = 300
+    closes = np.array([100.0 * (1.005 ** k) for k in range(n)])
+    # NOTE: _build_panel still stamps market_cap_cr, but default config
+    # ignores it. Pre-Champion-B config would have rejected this row.
+    panel = _build_panel(
+        {"TINY": closes},
+        start=date(2025, 1, 1),
+        market_caps={"TINY": 5.0},  # far below any reasonable floor
+    )
+    metrics = compute_universe_metrics(panel)
+    d = pd.Timestamp(date(2025, 1, 1) + timedelta(days=n - 1)).date()
+    ts = build_target_set(
+        metrics, d, capital=1_000_000.0,
+        intraday_volumes={"TINY": 50_000.0},
+    )
+    assert {r.symbol for r in ts.selected()} == {"TINY"}
+
+
+def test_compute_metrics_works_without_market_cap_column():
+    """Under Champion B defaults the panel does not need market_cap_cr."""
+    n = 300
+    closes = np.array([100.0 * (1.005 ** k) for k in range(n)])
+    rows = []
+    for sym, series in {"X": closes}.items():
+        for i, c in enumerate(series):
+            rows.append({
+                "symbol": sym, "date": pd.Timestamp(date(2025, 1, 1) + timedelta(days=i)),
+                "open": float(c), "high": float(c) * 1.005, "low": float(c) * 0.995,
+                "close": float(c), "volume": 100_000.0,
+            })
+    panel = pd.DataFrame(rows)
+    # Does not raise even though market_cap_cr is absent.
+    metrics = compute_universe_metrics(panel)
+    assert "relative_return_63d" in metrics.columns
+
+
 def test_static_eligible_symbols_excludes_volume_check():
     """`static_eligible_symbols` returns static-filter survivors regardless
     of volume data — the trading job uses it to narrow the set of symbols
     for which intraday volume is fetched."""
     n = 300
+    cfg = StrategyConfig(use_mcap_filter=True)  # exercise the mcap gate.
     closes = np.array([100.0 * (1.005 ** k) for k in range(n)])
     panel = _build_panel(
         {"A": closes, "SMALL": closes},
         start=date(2025, 1, 1),
         market_caps={"A": 500.0, "SMALL": 10.0},  # SMALL fails market-cap.
     )
-    metrics = compute_universe_metrics(panel)
+    metrics = compute_universe_metrics(panel, cfg)
     d = pd.Timestamp(date(2025, 1, 1) + timedelta(days=n - 1)).date()
-    survivors = set(static_eligible_symbols(metrics, d))
+    survivors = set(static_eligible_symbols(metrics, d, cfg))
     assert "A" in survivors
     assert "SMALL" not in survivors

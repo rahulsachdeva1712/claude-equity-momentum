@@ -161,6 +161,15 @@ CREATE TABLE IF NOT EXISTS audit_log (
     http_status INTEGER,
     created_at TEXT NOT NULL
 );
+
+-- Last-known mark for open paper-book symbols, so the UI can show true
+-- live-MTM per position. Written by a periodic worker job during market
+-- hours (single-writer invariant: worker only). Read by the web paper tab.
+CREATE TABLE IF NOT EXISTS live_ltp (
+    symbol TEXT PRIMARY KEY,
+    ltp REAL NOT NULL,
+    fetched_at TEXT NOT NULL
+);
 """
 
 

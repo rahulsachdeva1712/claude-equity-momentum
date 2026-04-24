@@ -15,7 +15,7 @@ import pandas as pd
 from app.alerts import Alert, raise_alert
 from app.db import connect, tx
 from app.dhan.client import DhanClient, jwt_seconds_to_expiry
-from app.dhan.errors import DhanUnavailable
+from app.dhan.errors import DhanError, DhanUnavailable
 from app.dhan.models import OHLCBar
 from app.live.engine import is_live_enabled, place_orders
 from app.live.recon import compute_live_daily_pnl, snapshot_positions
@@ -33,8 +33,45 @@ from app.strategy.signals import (
 )
 from app.strategy.universe import UniverseEntry, UniverseProvider, default_provider
 from app.time_utils import now_ist, session_date_for
+from app.universe.refresh import refresh_universe, universe_csv_path
 
 log = logging.getLogger("jobs")
+
+
+async def universe_refresh_job() -> None:
+    """Nightly refresh of ``<state_dir>/universe/universe.csv``.
+
+    Runs the Champion B backtest universe logic (series in {A,B,T,X,XT} +
+    20-day ADV >= 10,000) against the BSE bhavcopy, joined to the Dhan
+    scrip master to pick up ``security_id`` for live/paper orders. The
+    refresh is an I/O-bound task we run in a thread so APScheduler's event
+    loop stays responsive; errors are alerted but do not crash the worker.
+    """
+    loop = asyncio.get_event_loop()
+    conn = connect()
+    try:
+        try:
+            path = await loop.run_in_executor(None, refresh_universe)
+        except Exception as e:  # noqa: BLE001 — alert everything, don't crash the scheduler.
+            raise_alert(
+                conn,
+                Alert(
+                    severity="error",
+                    source="universe",
+                    message=f"universe refresh failed: {type(e).__name__}: {e}",
+                ),
+            )
+            return
+        raise_alert(
+            conn,
+            Alert(
+                severity="info",
+                source="universe",
+                message=f"universe refresh complete: {path}",
+            ),
+        )
+    finally:
+        conn.close()
 
 
 def _bars_to_panel(bars_by_symbol: dict[str, list[OHLCBar]], universe: list[UniverseEntry]) -> pd.DataFrame:
@@ -62,13 +99,44 @@ def _bars_to_panel(bars_by_symbol: dict[str, list[OHLCBar]], universe: list[Univ
     return pd.DataFrame(rows)
 
 
+def _ist_clock_market_open(now: datetime | None = None) -> bool:
+    """Conservative fallback when Dhan market-status is unreachable: treat
+    Mon-Fri 09:15-15:30 IST as open. Doesn't know about exchange holidays,
+    so on a holiday we'd hand the job to Dhan's order API, which rejects
+    with a documented-alert error path — better than blocking all trading
+    on a working day because an upstream endpoint URL drifted.
+    """
+    t = now or now_ist()
+    if t.weekday() >= 5:
+        return False
+    mins = t.hour * 60 + t.minute
+    return 9 * 60 + 15 <= mins <= 15 * 60 + 30
+
+
 async def _market_is_open(dhan: DhanClient, conn: sqlite3.Connection) -> bool:
-    """FRD B.5: query Dhan at trigger time, alert + skip if closed."""
+    """FRD B.5: query Dhan at trigger time, alert + skip if closed.
+
+    Dhan's market-status endpoint has been observed to 404 after an API
+    rename. On any Dhan error (transport, 4xx, 5xx) we fall back to a
+    local IST-clock check so a stale endpoint URL doesn't block the whole
+    trading day — the error is still alerted so the user can fix the URL.
+    """
     try:
         status = await dhan.market_status()
-    except DhanUnavailable as e:
-        raise_alert(conn, Alert(severity="warn", source="jobs", message=f"market_status unavailable: {e}"))
-        return False
+    except (DhanUnavailable, DhanError) as e:
+        fallback_open = _ist_clock_market_open()
+        raise_alert(
+            conn,
+            Alert(
+                severity="warn",
+                source="jobs",
+                message=(
+                    f"market_status unavailable ({e}); falling back to IST clock: "
+                    f"{'open' if fallback_open else 'closed'}"
+                ),
+            ),
+        )
+        return fallback_open
     if status != "OPEN":
         raise_alert(
             conn,
@@ -93,7 +161,10 @@ async def market_status_poll_job(dhan: DhanClient) -> None:
     """
     try:
         status = await dhan.market_status()
-    except DhanUnavailable as e:
+    except (DhanUnavailable, DhanError) as e:
+        # Treat 4xx the same as 5xx/transport for polling: don't spam alerts
+        # at 2/min; let the row's updated_at age out to 'unknown'. The
+        # startup self-check + execution_job's alerting remain as signals.
         log.debug("market_status poll failed: %s", e)
         return
     if not status:
@@ -108,6 +179,77 @@ async def market_status_poll_job(dhan: DhanClient) -> None:
             )
     finally:
         conn.close()
+
+
+async def ltp_poll_job(dhan: DhanClient) -> None:
+    """Poll the last-known price for each open paper-book symbol so the web
+    paper tab can show a genuinely live Marked Price + Unrealized P&L.
+
+    Writes to ``live_ltp`` (symbol, ltp, fetched_at). Uses the 09:30→09:31
+    one-minute bar for the freshest minute candle Dhan will serve during
+    market hours; if Dhan is unavailable the row is left untouched and the
+    UI's "stale" marker kicks in (same pattern as the market-status pill).
+
+    The job is idempotent and cheap: at most ~20 open positions → 20 HTTP
+    calls per run, far under Dhan's quota.
+    """
+    conn = connect()
+    try:
+        rows = conn.execute(
+            "SELECT pb.symbol, s.security_id, s.exchange_segment"
+            " FROM paper_book pb"
+            " LEFT JOIN signals s ON s.symbol = pb.symbol"
+            "  AND s.session_date = (SELECT MAX(session_date) FROM signals WHERE symbol = pb.symbol)"
+            " WHERE pb.qty > 0"
+        ).fetchall()
+    finally:
+        conn.close()
+    if not rows:
+        return
+
+    # Window = the last completed minute. Dhan returns the candle as soon as
+    # the minute boundary passes.
+    now = now_ist()
+    to_dt = now.replace(second=0, microsecond=0)
+    from_dt = to_dt - timedelta(minutes=2)
+    from_iso = from_dt.strftime("%Y-%m-%d %H:%M:%S")
+    to_iso = to_dt.strftime("%Y-%m-%d %H:%M:%S")
+
+    updates: list[tuple[str, float, str]] = []
+    skipped = 0
+    for r in rows:
+        sym = r["symbol"]
+        sec = r["security_id"]
+        seg = r["exchange_segment"] or "BSE_EQ"
+        if not sec:
+            skipped += 1
+            continue
+        try:
+            bars = await dhan.intraday(sec, seg, 1, from_iso, to_iso)
+        except (DhanUnavailable, DhanError) as e:
+            log.debug("ltp poll: skip %s (%s)", sym, e)
+            skipped += 1
+            continue
+        if not bars:
+            continue
+        last = bars[-1]
+        updates.append((sym, float(last.close), now.isoformat()))
+
+    if not updates:
+        return
+    conn = connect()
+    try:
+        with tx(conn):
+            for sym, ltp, ts in updates:
+                conn.execute(
+                    "INSERT INTO live_ltp (symbol, ltp, fetched_at) VALUES (?, ?, ?)"
+                    " ON CONFLICT(symbol) DO UPDATE SET ltp=excluded.ltp, fetched_at=excluded.fetched_at",
+                    (sym, ltp, ts),
+                )
+    finally:
+        conn.close()
+    if skipped:
+        log.debug("ltp poll: updated=%d skipped=%d", len(updates), skipped)
 
 
 COMMAND_RUN_REBALANCE = "run_rebalance.now"
@@ -241,6 +383,7 @@ async def execution_job(
     dhan: DhanClient,
     provider: UniverseProvider | None = None,
     capital_override: float | None = None,
+    force: bool = False,
 ) -> None:
     """09:30 IST — single consolidated signal + execution job. FRD B.5.
 
@@ -260,11 +403,15 @@ async def execution_job(
        place tagged Dhan orders and propagate actual fill qty back to paper
        (parity rule).
     7. Mark sessions.execution_completed_at to block re-runs (FRD B.13).
+
+    ``force=True`` bypasses (1) the market-open check and (2) the idempotency
+    guard. Intended for the post-market same-day backfill tool
+    (``python -m app.tools.backfill_today``); never used by the scheduled run.
     """
     provider = provider or default_provider()
     conn = connect()
     try:
-        if not await _market_is_open(dhan, conn):
+        if not force and not await _market_is_open(dhan, conn):
             return
 
         sess = session_date_for(now_ist())
@@ -273,7 +420,7 @@ async def execution_job(
         done = conn.execute(
             "SELECT execution_completed_at FROM sessions WHERE session_date = ?", (sess.isoformat(),)
         ).fetchone()
-        if done and done["execution_completed_at"]:
+        if not force and done and done["execution_completed_at"]:
             log.info("execution already completed for %s; skipping", sess)
             return
 
@@ -287,14 +434,36 @@ async def execution_job(
         to_date = sess.isoformat()
 
         bars_by_sec: dict[str, list[OHLCBar]] = {}
+        skipped_client = 0
+        skipped_unavailable = 0
         for u in universe:
             try:
                 bars = await dhan.historical_daily(u.security_id, u.exchange_segment, from_date, to_date)
             except DhanUnavailable as e:
-                log.warning("historical fetch failed for %s: %s", u.symbol, e)
+                # Upstream hiccup — log and move on; a single symbol must not
+                # take down a rebalance of ~2k symbols.
+                skipped_unavailable += 1
+                if skipped_unavailable <= 5:
+                    log.warning("historical fetch transport-failed for %s: %s", u.symbol, e)
+                continue
+            except DhanError as e:
+                # 4xx on a single symbol (bad security_id, delisted, segment
+                # mismatch, etc.) must not crash the whole job. Log the first
+                # few with payload so we can debug Dhan-side drift, then skip.
+                skipped_client += 1
+                if skipped_client <= 5:
+                    log.warning(
+                        "historical fetch rejected for %s (sec_id=%s seg=%s): %s payload=%s",
+                        u.symbol, u.security_id, u.exchange_segment, e, getattr(e, "payload", None),
+                    )
                 continue
             if bars:
                 bars_by_sec[u.security_id] = bars
+        if skipped_client or skipped_unavailable:
+            log.info(
+                "historical fetch done: ok=%d client_err=%d transport_err=%d",
+                len(bars_by_sec), skipped_client, skipped_unavailable,
+            )
 
         panel = _bars_to_panel(bars_by_sec, universe)
         if panel.empty:
@@ -504,6 +673,11 @@ async def _fetch_0925_0930_volumes(
         except DhanUnavailable as e:
             log.warning("intraday volume fetch failed for %s: %s", sym, e)
             continue
+        except DhanError as e:
+            # Fail-closed: treat a client-side rejection like a missing candle
+            # so the volume gate rejects. Logging preserves debuggability.
+            log.warning("intraday volume rejected for %s: %s payload=%s", sym, e, getattr(e, "payload", None))
+            continue
         if not bars:
             continue
         out[sym] = float(sum(b.volume for b in bars))
@@ -533,6 +707,10 @@ async def _fetch_0930_closes(
             bars = await dhan.intraday(row["security_id"], row["exchange_segment"] or "BSE_EQ", 1, from_iso, to_iso)
         except DhanUnavailable as e:
             log.warning("intraday fetch failed for %s: %s", sym, e)
+            out[sym] = None
+            continue
+        except DhanError as e:
+            log.warning("intraday fetch rejected for %s: %s payload=%s", sym, e, getattr(e, "payload", None))
             out[sym] = None
             continue
         out[sym] = bars[0].close if bars else None

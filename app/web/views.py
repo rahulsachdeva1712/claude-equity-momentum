@@ -1,14 +1,26 @@
 """Read-model helpers for the web UI. Pure SQL -> Python dicts.
 Keeps routes thin and templates clean.
+
+Paper tab aims for parity with (and exceeds) a full rebalance-backtester
+dashboard — KPIs, today-status row, dual P&L charts, perf-summary grid,
+rich per-position book with live marks, and day-grouped trade log. The
+richer view-model lives here so the Jinja template stays declarative.
 """
 from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import date, datetime, timezone
+from collections import defaultdict
+from datetime import date, datetime, time, timezone
+from typing import Any
 
 from app.dhan.client import jwt_expiry_epoch
 from app.time_utils import IST
+
+
+# --------------------------------------------------------------------------
+# Compatibility: used by Live tab + existing tests.
+# --------------------------------------------------------------------------
 
 
 def _summary(conn: sqlite3.Connection, prefix: str) -> dict:
@@ -23,18 +35,28 @@ def _summary(conn: sqlite3.Connection, prefix: str) -> dict:
         else:
             realized_total -= r["charges_total"]
 
-    latest = conn.execute(f"SELECT realized, unrealized, mtm FROM {prefix}_pnl_daily ORDER BY session_date DESC LIMIT 1").fetchone()
+    latest = conn.execute(
+        f"SELECT realized, unrealized, mtm FROM {prefix}_pnl_daily"
+        " ORDER BY session_date DESC LIMIT 1"
+    ).fetchone()
     today = {"realized": 0.0, "unrealized": 0.0, "mtm": 0.0}
     if latest:
-        today = {"realized": float(latest["realized"]), "unrealized": float(latest["unrealized"]), "mtm": float(latest["mtm"])}
+        today = {
+            "realized": float(latest["realized"]),
+            "unrealized": float(latest["unrealized"]),
+            "mtm": float(latest["mtm"]),
+        }
 
     if prefix == "paper":
         book = conn.execute("SELECT COUNT(*) AS c FROM paper_book").fetchone()["c"]
     else:
-        book = conn.execute(
-            "SELECT COUNT(DISTINCT symbol) AS c FROM live_positions_snapshot"
-            " WHERE taken_at = (SELECT MAX(taken_at) FROM live_positions_snapshot)"
-        ).fetchone()["c"] or 0
+        book = (
+            conn.execute(
+                "SELECT COUNT(DISTINCT symbol) AS c FROM live_positions_snapshot"
+                " WHERE taken_at = (SELECT MAX(taken_at) FROM live_positions_snapshot)"
+            ).fetchone()["c"]
+            or 0
+        )
 
     closed = conn.execute(f"SELECT COUNT(*) AS c FROM {prefix}_fills").fetchone()["c"]
     return {
@@ -72,11 +94,14 @@ def paper_book_rows(conn: sqlite3.Connection) -> list[dict]:
 
 
 def live_positions(conn: sqlite3.Connection) -> list[dict]:
-    latest = conn.execute("SELECT MAX(taken_at) AS t FROM live_positions_snapshot").fetchone()["t"]
+    latest = conn.execute(
+        "SELECT MAX(taken_at) AS t FROM live_positions_snapshot"
+    ).fetchone()["t"]
     if not latest:
         return []
     rows = conn.execute(
-        "SELECT symbol, qty, avg_cost, ltp, unrealized FROM live_positions_snapshot WHERE taken_at = ? ORDER BY symbol",
+        "SELECT symbol, qty, avg_cost, ltp, unrealized FROM live_positions_snapshot"
+        " WHERE taken_at = ? ORDER BY symbol",
         (latest,),
     ).fetchall()
     return [dict(r) for r in rows]
@@ -120,6 +145,573 @@ def alerts_unacked(conn: sqlite3.Connection, limit: int = 20) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+# --------------------------------------------------------------------------
+# Paper-tab rich view-model.
+# --------------------------------------------------------------------------
+
+
+def _parse_ts(s: str | None) -> datetime | None:
+    if not s:
+        return None
+    try:
+        d = datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    if d.tzinfo is None:
+        d = d.replace(tzinfo=IST)
+    return d.astimezone(IST)
+
+
+def _fmt_ts(d: datetime | None) -> str:
+    if d is None:
+        return "—"
+    return d.strftime("%Y-%m-%d %H:%M")
+
+
+def _fmt_date_short(d: datetime) -> str:
+    """e.g. '24 Apr 26, 09:30 am'."""
+    hh = d.strftime("%I").lstrip("0") or "12"
+    return d.strftime(f"%d %b %y, {hh}:%M %p").replace("AM", "am").replace("PM", "pm")
+
+
+def _fmt_inr(n: float, decimals: int = 2) -> str:
+    """Indian-style grouping (12,34,567.89)."""
+    neg = n < 0
+    n = abs(n)
+    whole, frac = f"{n:.{decimals}f}".split(".") if decimals else (f"{int(round(n))}", "")
+    if len(whole) <= 3:
+        out = whole
+    else:
+        head, tail = whole[:-3], whole[-3:]
+        head = ",".join(
+            [head[max(0, i - 2) : i] for i in range(len(head), 0, -2)][::-1]
+        )
+        out = f"{head},{tail}"
+    if decimals:
+        out = f"{out}.{frac}"
+    return f"-{out}" if neg else out
+
+
+def paper_meta(conn: sqlite3.Connection, session_date: date) -> dict:
+    """Sub-header facts: book start, session start, last-updated."""
+    book_start_row = conn.execute(
+        "SELECT MIN(updated_at) AS t FROM paper_book"
+    ).fetchone()
+    first_fill_row = conn.execute(
+        "SELECT MIN(filled_at) AS t FROM paper_fills"
+    ).fetchone()
+    book_start = _parse_ts((book_start_row or {}).get("t") if isinstance(book_start_row, dict)
+                           else book_start_row["t"] if book_start_row else None) \
+        or _parse_ts(first_fill_row["t"] if first_fill_row else None)
+
+    # Session start: 00:00 IST on `session_date` is the neutral answer
+    # (matches reference UI).
+    session_start_dt = datetime.combine(session_date, time(0, 0), tzinfo=IST)
+
+    # Last updated: max across the four possible sources.
+    cands: list[datetime | None] = []
+    for sql in (
+        "SELECT MAX(computed_at) AS t FROM paper_pnl_daily",
+        "SELECT MAX(updated_at) AS t FROM paper_book",
+        "SELECT MAX(filled_at) AS t FROM paper_fills",
+        "SELECT MAX(fetched_at) AS t FROM live_ltp",
+    ):
+        try:
+            row = conn.execute(sql).fetchone()
+            cands.append(_parse_ts(row["t"]) if row and row["t"] else None)
+        except sqlite3.OperationalError:
+            # Table may not exist yet on fresh installs.
+            continue
+    last_updated = max((c for c in cands if c is not None), default=None)
+
+    return {
+        "book_start": _fmt_ts(book_start) if book_start else "—",
+        "session_start": _fmt_ts(session_start_dt),
+        "last_updated": _fmt_ts(last_updated) if last_updated else "—",
+    }
+
+
+def _chronological_paper_fills(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT id, session_date, symbol, side, fill_qty, fill_price, charges_total,"
+        " charges_json, filled_at FROM paper_fills ORDER BY filled_at, id"
+    ).fetchall()
+
+
+def _replay_closed_trades(fills: list[sqlite3.Row]) -> list[dict]:
+    """Walk fills in time order. A SELL closes qty against the running avg
+    cost of that symbol. Returns one row per SELL with realized P&L after
+    charges (both legs' charges allocated to this close-leg).
+
+    Uses avg-cost method (same as paper_book) so the realized figure the
+    UI shows matches the book's cost_basis accounting.
+    """
+    running: dict[str, dict] = {}  # symbol -> {qty, cost_basis, open_charges}
+    closed: list[dict] = []
+    for f in fills:
+        sym = f["symbol"]
+        state = running.setdefault(sym, {"qty": 0, "cost_basis": 0.0, "charges_pending": 0.0})
+        if f["side"] == "BUY":
+            state["qty"] += int(f["fill_qty"])
+            state["cost_basis"] += float(f["fill_qty"]) * float(f["fill_price"])
+            state["charges_pending"] += float(f["charges_total"])
+        else:  # SELL
+            qty = int(f["fill_qty"])
+            if state["qty"] <= 0:
+                # Shouldn't happen in momentum long-only strategy; skip.
+                continue
+            avg_cost = state["cost_basis"] / state["qty"] if state["qty"] else 0.0
+            # Allocate a proportional share of the entry charges to this close-leg.
+            alloc = state["charges_pending"] * (qty / state["qty"]) if state["qty"] else 0.0
+            pnl_gross = (float(f["fill_price"]) - avg_cost) * qty
+            pnl_net = pnl_gross - float(f["charges_total"]) - alloc
+            closed.append(
+                {
+                    "session_date": f["session_date"],
+                    "symbol": sym,
+                    "qty": qty,
+                    "avg_cost": avg_cost,
+                    "fill_price": float(f["fill_price"]),
+                    "pnl_gross": pnl_gross,
+                    "pnl_net": pnl_net,
+                    "charges_sell": float(f["charges_total"]),
+                    "charges_alloc_buy": alloc,
+                    "filled_at": f["filled_at"],
+                    "return_pct": (pnl_net / (avg_cost * qty) * 100.0) if avg_cost else 0.0,
+                }
+            )
+            # Reduce state.
+            state["cost_basis"] -= avg_cost * qty
+            state["qty"] -= qty
+            state["charges_pending"] -= alloc
+            if state["qty"] == 0:
+                state["cost_basis"] = 0.0
+                state["charges_pending"] = 0.0
+    return closed
+
+
+def paper_summary_rich(conn: sqlite3.Connection) -> dict:
+    """Full KPI set including win-rate, profit factor, drawdown, etc.
+
+    Returns a superset of paper_summary(). Safe to compute on an empty DB.
+    """
+    base = paper_summary(conn)
+    fills = _chronological_paper_fills(conn)
+    closed = _replay_closed_trades(fills)
+
+    pnl_series = pnl_timeseries(conn, "paper", limit=10000)
+
+    n = len(closed)
+    wins = [c for c in closed if c["pnl_net"] > 0]
+    losses = [c for c in closed if c["pnl_net"] < 0]
+    win_rate = (len(wins) / n * 100.0) if n else 0.0
+    loss_rate = (len(losses) / n * 100.0) if n else 0.0
+    avg_pnl = (sum(c["pnl_net"] for c in closed) / n) if n else 0.0
+    avg_win = (sum(c["pnl_net"] for c in wins) / len(wins)) if wins else 0.0
+    avg_loss = (sum(c["pnl_net"] for c in losses) / len(losses)) if losses else 0.0
+    best = max((c["pnl_net"] for c in closed), default=0.0)
+    worst = min((c["pnl_net"] for c in closed), default=0.0)
+    sum_wins = sum(c["pnl_net"] for c in wins)
+    sum_losses_abs = -sum(c["pnl_net"] for c in losses)
+    profit_factor = (sum_wins / sum_losses_abs) if sum_losses_abs > 1e-9 else (
+        float("inf") if sum_wins > 0 else 0.0
+    )
+    expectancy = avg_pnl  # per-trade expectancy; same as avg_pnl for a flat sample
+
+    # Drawdown over cumulative MTM sequence.
+    cum = []
+    acc = 0.0
+    for p in pnl_series:
+        acc += float(p["mtm"])
+        cum.append(acc)
+    max_dd = 0.0
+    peak = 0.0
+    dd_started_at = None
+    dd_len = 0
+    current_dd_len = 0
+    max_dd_len = 0
+    for v in cum:
+        if v >= peak:
+            peak = v
+            current_dd_len = 0
+        else:
+            current_dd_len += 1
+            draw = v - peak
+            if draw < max_dd:
+                max_dd = draw
+                max_dd_len = current_dd_len
+    max_drawdown = -max_dd  # positive number for display
+
+    # Streaks.
+    max_win_streak = 0
+    max_loss_streak = 0
+    cur_w = cur_l = 0
+    for c in closed:
+        if c["pnl_net"] > 0:
+            cur_w += 1
+            cur_l = 0
+            max_win_streak = max(max_win_streak, cur_w)
+        elif c["pnl_net"] < 0:
+            cur_l += 1
+            cur_w = 0
+            max_loss_streak = max(max_loss_streak, cur_l)
+        else:
+            cur_w = cur_l = 0
+
+    overall_profit = base["cumulative"]
+    return_over_maxdd = (overall_profit / max_drawdown) if max_drawdown > 1e-9 else (
+        float("inf") if overall_profit > 0 else 0.0
+    )
+    reward_to_risk = (avg_win / -avg_loss) if avg_loss < -1e-9 else (
+        float("inf") if avg_win > 0 else 0.0
+    )
+
+    def _safe(n: float) -> float:
+        """Clamp infinities to a display sentinel (0.0) and NaN to 0.0 so
+        Jinja number formatters never receive values they can't render."""
+        if n != n or n in (float("inf"), float("-inf")):
+            return 0.0
+        return n
+
+    def _is_inf(n: float) -> bool:
+        return n in (float("inf"), float("-inf"))
+
+    base.update(
+        {
+            "today_change": base["today_mtm"],
+            "closed_trades": n,
+            "win_count": len(wins),
+            "loss_count": len(losses),
+            "win_rate": win_rate,
+            "loss_rate": loss_rate,
+            "avg_pnl_per_closed": avg_pnl,
+            "avg_profit_winning": avg_win,
+            "avg_loss_losing": avg_loss,
+            "best_trade": best,
+            "worst_trade": worst,
+            "profit_factor": _safe(profit_factor),
+            "profit_factor_is_inf": _is_inf(profit_factor),
+            "max_drawdown": max_drawdown,
+            "max_drawdown_duration_days": max_dd_len,
+            "return_over_maxdd": _safe(return_over_maxdd),
+            "return_over_maxdd_is_inf": _is_inf(return_over_maxdd),
+            "reward_to_risk": _safe(reward_to_risk),
+            "reward_to_risk_is_inf": _is_inf(reward_to_risk),
+            "expectancy": expectancy,
+            "max_win_streak": max_win_streak,
+            "max_loss_streak": max_loss_streak,
+            "overall_profit": overall_profit,
+        }
+    )
+    return base
+
+
+def today_status(conn: sqlite3.Connection, session_date: date) -> dict:
+    """One-row summary of today's paper session, for the Today Status band."""
+    book = conn.execute(
+        "SELECT COUNT(*) AS c, COALESCE(SUM(cost_basis),0) AS invest, MAX(updated_at) AS t"
+        " FROM paper_book"
+    ).fetchone()
+    today_pnl = conn.execute(
+        "SELECT realized, unrealized, mtm, computed_at FROM paper_pnl_daily WHERE session_date = ?",
+        (session_date.isoformat(),),
+    ).fetchone()
+    today_buys = conn.execute(
+        "SELECT COUNT(*) AS c FROM paper_fills WHERE session_date = ? AND side = 'BUY'",
+        (session_date.isoformat(),),
+    ).fetchone()["c"]
+
+    legs = int(book["c"]) if book else 0
+    invest = float(book["invest"]) if book else 0.0
+    mtm = float(today_pnl["mtm"]) if today_pnl else 0.0
+    realized = float(today_pnl["realized"]) if today_pnl else 0.0
+    unreal = float(today_pnl["unrealized"]) if today_pnl else 0.0
+    ret_pct = (mtm / invest * 100.0) if invest > 1e-9 else 0.0
+    marked_at = _parse_ts(
+        (today_pnl["computed_at"] if today_pnl else None) or (book["t"] if book else None)
+    )
+
+    trade_opened = bool(today_buys)
+    status = "Open" if legs > 0 else ("Closed" if trade_opened else "Pending")
+    exit_type = "Open Position" if legs > 0 else ("Closed" if trade_opened else "—")
+
+    return {
+        "index": "BSE",
+        "date": session_date.isoformat(),
+        "trade_slot": "Primary",
+        "status": status,
+        "trade_opened": trade_opened,
+        "open_legs": legs,
+        "investment_rs": invest,
+        "today_mtm": mtm,
+        "realized_rs": realized,
+        "open_unrealized_pnl": unreal,
+        "return_pct": ret_pct,
+        "exit_type": exit_type,
+        "marked_at": _fmt_ts(marked_at) if marked_at else "—",
+    }
+
+
+def performance_summary(conn: sqlite3.Connection) -> list[list[dict]]:
+    """3-column metric grid matching the reference screenshot."""
+    s = paper_summary_rich(conn)
+
+    def inr(n: float, d: int = 2) -> str:
+        if n != n or n in (float("inf"), float("-inf")):
+            return "inf" if n > 0 else "-inf"
+        return f"Rs {_fmt_inr(n, d)}"
+
+    def pct(n: float) -> str:
+        if n != n or n in (float("inf"), float("-inf")):
+            return "inf" if n > 0 else "-inf"
+        return f"{n:.2f}%"
+
+    def num(n: float, d: int = 2) -> str:
+        if n != n or n in (float("inf"), float("-inf")):
+            return "inf" if n > 0 else "-inf"
+        return f"{n:.{d}f}"
+
+    col1 = [
+        {"metric": "Overall Paper Profit", "value": inr(s["overall_profit"])},
+        {"metric": "Closed Trades", "value": str(s["closed_trades"])},
+        {"metric": "Average P&L Per Closed Trade", "value": inr(s["avg_pnl_per_closed"])},
+        {"metric": "Win %", "value": pct(s["win_rate"])},
+        {"metric": "Loss %", "value": pct(s["loss_rate"])},
+        {"metric": "Average Profit on Winning Trades", "value": inr(s["avg_profit_winning"])},
+    ]
+    col2 = [
+        {"metric": "Average Loss on Losing Trades", "value": inr(s["avg_loss_losing"])},
+        {"metric": "Best Trade", "value": inr(s["best_trade"])},
+        {"metric": "Worst Trade", "value": inr(s["worst_trade"])},
+        {"metric": "Max Drawdown", "value": inr(s["max_drawdown"])},
+        {"metric": "Duration of Max Drawdown", "value": str(s["max_drawdown_duration_days"])},
+        {"metric": "Open Positions Right Now", "value": str(s["open_positions"])},
+    ]
+    return_over_maxdd_str = "inf" if s.get("return_over_maxdd_is_inf") else num(s["return_over_maxdd"])
+    reward_to_risk_str = "inf" if s.get("reward_to_risk_is_inf") else num(s["reward_to_risk"])
+    col3 = [
+        {"metric": "Return / MaxDD", "value": return_over_maxdd_str},
+        {"metric": "Reward to Risk Ratio", "value": reward_to_risk_str},
+        {"metric": "Expectancy / Closed Trade", "value": inr(s["expectancy"])},
+        {"metric": "Max Win Streak (trades)", "value": str(s["max_win_streak"])},
+        {"metric": "Max Losing Streak (trades)", "value": str(s["max_loss_streak"])},
+        {"metric": "Max Days in Drawdown", "value": str(s["max_drawdown_duration_days"])},
+    ]
+    return [col1, col2, col3]
+
+
+def signals_today_brief(conn: sqlite3.Connection, session_date: date) -> list[dict]:
+    """Short signal list for the top-right table: Action, Symbol, Target Qty,
+    Signal Generated At, Trade At. `selected=1` rows only."""
+    rows = conn.execute(
+        "SELECT symbol, target_qty FROM signals WHERE session_date = ? AND selected = 1"
+        " ORDER BY rank_by_126d",
+        (session_date.isoformat(),),
+    ).fetchall()
+    # Signal is stamped at 09:10 IST, trades at 09:30 IST (FRD A.3 / A.5).
+    signal_at = datetime.combine(session_date, time(9, 10), tzinfo=IST).strftime("%Y-%m-%d %H:%M")
+    trade_at = datetime.combine(session_date, time(9, 30), tzinfo=IST).strftime("%Y-%m-%d %H:%M")
+    return [
+        {
+            "action": "BUY",
+            "symbol": r["symbol"],
+            "target_qty": r["target_qty"],
+            "signal_generated_at": signal_at,
+            "trade_at": trade_at,
+        }
+        for r in rows
+    ]
+
+
+def paper_book_rich(conn: sqlite3.Connection) -> list[dict]:
+    """Current paper book with marked price, market value, unrealized P&L.
+
+    Marked price priority: live_ltp (fresh) → last-known fill price for the
+    symbol → avg_cost (falls back to 0 unrealized when nothing else is known).
+    """
+    book = conn.execute(
+        "SELECT symbol, qty, avg_cost, cost_basis, updated_at FROM paper_book ORDER BY symbol"
+    ).fetchall()
+    if not book:
+        return []
+
+    # Prefetch latest fill + signal timestamps + LTPs for all open symbols.
+    ltp_map: dict[str, dict] = {}
+    try:
+        for r in conn.execute("SELECT symbol, ltp, fetched_at FROM live_ltp"):
+            ltp_map[r["symbol"]] = {"ltp": float(r["ltp"]), "fetched_at": r["fetched_at"]}
+    except sqlite3.OperationalError:
+        pass
+
+    last_buy: dict[str, dict] = {}
+    for r in conn.execute(
+        "SELECT symbol, fill_price, filled_at FROM paper_fills WHERE side='BUY' ORDER BY filled_at"
+    ):
+        last_buy[r["symbol"]] = {"fill_price": float(r["fill_price"]), "filled_at": r["filled_at"]}
+
+    signal_at_map: dict[str, str] = {}
+    for r in conn.execute(
+        "SELECT symbol, MIN(session_date) AS first FROM signals WHERE selected=1 GROUP BY symbol"
+    ):
+        # Signals stamped at 09:10 IST on the session_date.
+        try:
+            d = date.fromisoformat(r["first"])
+            signal_at_map[r["symbol"]] = (
+                datetime.combine(d, time(9, 10), tzinfo=IST).strftime("%Y-%m-%d %H:%M")
+            )
+        except Exception:  # noqa: BLE001
+            signal_at_map[r["symbol"]] = "—"
+
+    out = []
+    for b in book:
+        sym = b["symbol"]
+        ltp_info = ltp_map.get(sym)
+        fill_info = last_buy.get(sym)
+        marked_price = None
+        marked_at = None
+        if ltp_info is not None:
+            marked_price = ltp_info["ltp"]
+            marked_at = ltp_info["fetched_at"]
+        elif fill_info is not None:
+            marked_price = fill_info["fill_price"]
+            marked_at = fill_info["filled_at"]
+        else:
+            marked_price = float(b["avg_cost"])
+            marked_at = b["updated_at"]
+
+        qty = int(b["qty"])
+        avg_cost = float(b["avg_cost"])
+        market_value = marked_price * qty
+        unrealized = (marked_price - avg_cost) * qty
+        unrealized_pct = ((marked_price - avg_cost) / avg_cost * 100.0) if avg_cost else 0.0
+
+        trade_at = "—"
+        if fill_info and fill_info["filled_at"]:
+            d = _parse_ts(fill_info["filled_at"])
+            if d:
+                trade_at = d.strftime("%Y-%m-%d %H:%M")
+
+        out.append(
+            {
+                "signal_at": signal_at_map.get(sym, "—"),
+                "trade_at": trade_at,
+                "symbol": sym,
+                "qty": qty,
+                "avg_cost": avg_cost,
+                "cost_basis": float(b["cost_basis"]),
+                "marked_price": marked_price,
+                "market_value": market_value,
+                "unrealized_pnl": unrealized,
+                "unrealized_pnl_pct": unrealized_pct,
+                "marked_at": _fmt_ts(_parse_ts(marked_at)) if marked_at else "—",
+                "is_stale": ltp_info is None,  # marks based on fill/avg, not live
+            }
+        )
+    return out
+
+
+def day_grouped_trade_log(conn: sqlite3.Connection, limit_days: int = 30) -> list[dict]:
+    """Trades grouped by session_date with running portfolio value and
+    per-fill details. Matches the reference screenshot's 'Trade log'.
+    """
+    fills = conn.execute(
+        "SELECT id, session_date, symbol, side, fill_qty, fill_price, charges_total,"
+        " charges_json, filled_at FROM paper_fills ORDER BY filled_at, id"
+    ).fetchall()
+    if not fills:
+        return []
+
+    # Replay for per-SELL realized P&L (matches book accounting).
+    closed_by_fill_id: dict[int, dict] = {}
+    running: dict[str, dict] = {}
+    for f in fills:
+        sym = f["symbol"]
+        st = running.setdefault(sym, {"qty": 0, "cost_basis": 0.0, "charges_pending": 0.0})
+        if f["side"] == "BUY":
+            st["qty"] += int(f["fill_qty"])
+            st["cost_basis"] += float(f["fill_qty"]) * float(f["fill_price"])
+            st["charges_pending"] += float(f["charges_total"])
+        else:
+            qty = int(f["fill_qty"])
+            if st["qty"] <= 0:
+                continue
+            avg = st["cost_basis"] / st["qty"] if st["qty"] else 0.0
+            alloc = st["charges_pending"] * (qty / st["qty"]) if st["qty"] else 0.0
+            pnl_net = (float(f["fill_price"]) - avg) * qty - float(f["charges_total"]) - alloc
+            ret_pct = (pnl_net / (avg * qty) * 100.0) if avg else 0.0
+            closed_by_fill_id[int(f["id"])] = {"pnl": pnl_net, "ret_pct": ret_pct, "avg": avg}
+            st["cost_basis"] -= avg * qty
+            st["qty"] -= qty
+            st["charges_pending"] -= alloc
+            if st["qty"] == 0:
+                st["cost_basis"] = 0.0
+                st["charges_pending"] = 0.0
+
+    # Running cumulative P&L (for portfolio value per day).
+    opening_capital = 100_000.0  # display default; reference screenshot uses 1L seed
+
+    days_order: list[str] = []
+    day_rows: dict[str, list[dict]] = defaultdict(list)
+    running_pnl_to_end_of_day: dict[str, float] = {}
+    per_day_pnl: dict[str, float] = defaultdict(float)
+
+    for f in fills:
+        sd = f["session_date"]
+        if sd not in day_rows:
+            days_order.append(sd)
+        try:
+            ch = json.loads(f["charges_json"])
+            nb = round(ch["total"] - ch["brokerage"], 4)
+        except Exception:  # noqa: BLE001
+            nb = None
+
+        closed = closed_by_fill_id.get(int(f["id"]))
+        entry_at = _parse_ts(f["filled_at"])
+        row: dict[str, Any] = {
+            "symbol": f["symbol"],
+            "side": f["side"],
+            "badge": "Rebalance",
+            "kind": "Partial Exit" if f["side"] == "SELL" else "New Entry",
+            "entry_at": _fmt_date_short(entry_at) if entry_at and f["side"] == "BUY" else "—",
+            "exit_at": _fmt_date_short(entry_at) if entry_at and f["side"] == "SELL" else "—",
+            "fill_price": float(f["fill_price"]),
+            "order_qty": int(f["fill_qty"]) if f["side"] == "BUY" else -int(f["fill_qty"]),
+            "fill_qty": int(f["fill_qty"]) if f["side"] == "BUY" else -int(f["fill_qty"]),
+            "profit_loss": closed["pnl"] if closed else None,
+            "returns_pct": closed["ret_pct"] if closed else None,
+            "non_broker_charges": nb,
+        }
+        day_rows[sd].append(row)
+        if closed:
+            per_day_pnl[sd] += closed["pnl"]
+
+    cum = 0.0
+    for sd in days_order:
+        cum += per_day_pnl.get(sd, 0.0)
+        running_pnl_to_end_of_day[sd] = cum
+
+    # Build collapsible groups in reverse-chronological order (newest first).
+    groups = []
+    for sd in reversed(days_order[-limit_days:]):
+        label_dt = datetime.fromisoformat(sd).replace(tzinfo=IST)
+        pv = opening_capital + running_pnl_to_end_of_day[sd]
+        groups.append(
+            {
+                "session_date": sd,
+                "label": f"Trades on {label_dt.strftime('%d %b %y')}, 09:30 am",
+                "portfolio_value": pv,
+                "portfolio_value_str": f"Rs {_fmt_inr(pv)}",
+                "rows": day_rows[sd],
+            }
+        )
+    return groups
+
+
+# --------------------------------------------------------------------------
+# Top-bar + auth helpers (unchanged below).
+# --------------------------------------------------------------------------
+
+
 def top_bar_status(conn: sqlite3.Connection, token: str, worker_pid_alive: bool, live_enabled: bool) -> dict:
     token_state, token_label = _classify_token(token)
     market_status, market_age_s = _read_market_status(conn)
@@ -145,9 +737,6 @@ def _read_market_status(conn: sqlite3.Connection) -> tuple[str, int | None]:
 
     - Missing row or stale row (> MARKET_STATUS_STALE_SECONDS) → ('unknown', age).
     - Fresh row → (uppercased Dhan value, age).
-
-    Age is always returned so the template / CSS can show a staleness badge
-    even while the label is 'unknown'.
     """
     row = conn.execute(
         "SELECT value, updated_at FROM settings WHERE key = 'market_status'"
@@ -171,9 +760,6 @@ def _classify_token(token: str, now: datetime | None = None) -> tuple[str, str]:
         return "missing", "no token"
     exp_epoch = jwt_expiry_epoch(token)
     if exp_epoch is None:
-        # Token is set but doesn't parse as JWT. Most common cause on Windows
-        # is a UTF-8 BOM in .env from Notepad fusing into the variable name,
-        # or the value being wrapped in quotes / extra whitespace.
         return "invalid", "token unparseable (check .env for BOM/quotes)"
     now_dt = now if now is not None else datetime.now(timezone.utc)
     if now_dt.tzinfo is None:
@@ -192,7 +778,6 @@ def _classify_token(token: str, now: datetime | None = None) -> tuple[str, str]:
 
 
 def _format_ago(secs: int) -> str:
-    """Compact relative-time suffix for past timestamps."""
     if secs < 60:
         return "just now"
     if secs < 3600:
@@ -205,7 +790,6 @@ def _format_ago(secs: int) -> str:
 
 
 def _day_phrase(when: date, today: date) -> str:
-    """Human-friendly day reference relative to today (both already in IST)."""
     delta = (today - when).days
     if delta == 0:
         return "today"

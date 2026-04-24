@@ -68,10 +68,14 @@ def _compute_per_symbol(df: pd.DataFrame, cfg: StrategyConfig) -> pd.DataFrame:
 def compute_universe_metrics(panel: pd.DataFrame, cfg: StrategyConfig = DEFAULT_CONFIG) -> pd.DataFrame:
     """Compute indicators + relative returns on a long-form OHLCV panel.
 
-    Required columns: symbol, date, open, high, low, close, market_cap_cr.
-    Optional: volume, security_id, exchange_segment.
+    Required columns: symbol, date, open, high, low, close.
+    Optional: volume, security_id, exchange_segment, market_cap_cr. The
+    market-cap column is only consulted when ``cfg.use_mcap_filter`` is
+    True — Champion B runs with the gate off (see config comment).
     """
-    required = {"symbol", "date", "open", "high", "low", "close", "market_cap_cr"}
+    required = {"symbol", "date", "open", "high", "low", "close"}
+    if cfg.use_mcap_filter:
+        required = required | {"market_cap_cr"}
     missing = required - set(panel.columns)
     if missing:
         raise ValueError(f"panel missing columns: {sorted(missing)}")
@@ -89,10 +93,11 @@ def compute_universe_metrics(panel: pd.DataFrame, cfg: StrategyConfig = DEFAULT_
 def _static_eligible_mask(row: pd.Series, cfg: StrategyConfig) -> bool:
     """All eligibility checks that depend only on daily indicators. FRD A.5
     minus the intraday volume gate."""
-    if not np.isfinite(row.get("market_cap_cr", np.nan)):
-        return False
-    if row["market_cap_cr"] < cfg.market_cap_min_cr:
-        return False
+    if cfg.use_mcap_filter:
+        if not np.isfinite(row.get("market_cap_cr", np.nan)):
+            return False
+        if row["market_cap_cr"] < cfg.market_cap_min_cr:
+            return False
     for col in ("ema_fast", "ema_slow", "close"):
         if not np.isfinite(row.get(col, np.nan)):
             return False

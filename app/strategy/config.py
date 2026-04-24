@@ -20,6 +20,12 @@ class StrategyConfig:
     use_cci_filter: bool = False
     use_atr_filter: bool = True
     use_volume_filter: bool = True
+    # Market-cap filter. Champion B (research/backtest_2y/verify.py) was
+    # finalized WITHOUT a market-cap floor — BSE bhavcopy carries no market
+    # cap, so the 2-year validation that produced the 8833% / Sharpe 12.2
+    # result had no mcap gate. Keeping the threshold in config for easy
+    # re-enablement when a trustworthy mcap source is wired up.
+    use_mcap_filter: bool = False
 
     rsi_threshold: float = 88.0
     mfi_threshold: float = 70.0
