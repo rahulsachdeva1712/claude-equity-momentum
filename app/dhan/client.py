@@ -34,6 +34,28 @@ _PATHS = {
 }
 
 
+def _normalize_dhan_datetime(s: str) -> str:
+    """Coerce a datetime string to Dhan v2's ``YYYY-MM-DD HH:MM:SS`` format.
+
+    Callers in this codebase build strings like ``"2026-04-24T09:25:00"`` —
+    valid ISO-8601 but rejected by Dhan's /charts/intraday with a DH-905
+    ``Input_Exception`` whose error message is misleading (talks about a 90-day
+    cap). Dhan wants a space separator and no timezone suffix, so we normalize
+    here rather than force every call site to remember the wire format.
+    """
+    s = s.strip()
+    # Drop a trailing "+HH:MM" or "Z" timezone suffix — Dhan rejects those.
+    if s.endswith("Z"):
+        s = s[:-1]
+    # Only strip offsets that appear AFTER the time portion (not as part of the date).
+    for tz_sep in ("+", "-"):
+        idx = s.find(tz_sep, 11)  # skip over "YYYY-MM-DD"
+        if idx != -1:
+            s = s[:idx]
+            break
+    return s.replace("T", " ", 1)
+
+
 def jwt_expiry_epoch(token: str) -> int | None:
     try:
         claims = jwt.decode(token, options={"verify_signature": False})
@@ -136,13 +158,17 @@ class DhanClient:
         from_iso: str,
         to_iso: str,
     ) -> list[OHLCBar]:
+        # Dhan v2 /charts/intraday wants "YYYY-MM-DD HH:MM:SS" with a *space*
+        # separator; an ISO-8601 "T" separator or a trailing timezone offset
+        # earns a DH-905 'Input_Exception' with a misleading "90 days" message.
+        # Normalize here so callers can pass either format.
         body = {
             "securityId": security_id,
             "exchangeSegment": exchange_segment,
             "instrument": "EQUITY",
             "interval": str(interval_minutes),
-            "fromDate": from_iso,
-            "toDate": to_iso,
+            "fromDate": _normalize_dhan_datetime(from_iso),
+            "toDate": _normalize_dhan_datetime(to_iso),
         }
         data = await self._request("POST", _PATHS["intraday"], json_body=body)
         return _parse_candles(security_id, data)

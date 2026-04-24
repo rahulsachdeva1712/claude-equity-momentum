@@ -11,7 +11,12 @@ import httpx
 import pytest
 import respx
 
-from app.dhan.client import DhanClient, jwt_expiry_epoch, jwt_seconds_to_expiry
+from app.dhan.client import (
+    DhanClient,
+    _normalize_dhan_datetime,
+    jwt_expiry_epoch,
+    jwt_seconds_to_expiry,
+)
 from app.dhan.errors import DhanAuthError, DhanError, DhanRejected, DhanUnavailable
 from app.dhan.models import PlaceOrderRequest
 
@@ -196,3 +201,39 @@ async def test_auth_header_is_sent():
 
     assert captured.get("access-token") == "abc.def.ghi"
     assert captured.get("client-id") == "client123"
+
+
+def test_normalize_dhan_datetime_converts_iso_T_to_space():
+    # ISO-8601 "T" separator → Dhan wants a space.
+    assert _normalize_dhan_datetime("2026-04-24T09:25:00") == "2026-04-24 09:25:00"
+
+
+def test_normalize_dhan_datetime_strips_timezone_suffix():
+    # Dhan rejects a timezone offset on the wire.
+    assert _normalize_dhan_datetime("2026-04-24T09:25:00+05:30") == "2026-04-24 09:25:00"
+    assert _normalize_dhan_datetime("2026-04-24T09:25:00Z") == "2026-04-24 09:25:00"
+
+
+def test_normalize_dhan_datetime_leaves_space_format_alone():
+    assert _normalize_dhan_datetime("2026-04-24 09:25:00") == "2026-04-24 09:25:00"
+
+
+@pytest.mark.asyncio
+async def test_intraday_sends_space_separated_dates():
+    """Regression: Dhan /charts/intraday returns DH-905 for ISO-8601 'T'
+    datetimes. The client must normalize to 'YYYY-MM-DD HH:MM:SS'."""
+    captured: dict = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content.decode())
+        return httpx.Response(200, json={"open": [], "high": [], "low": [], "close": [], "volume": [], "timestamp": []})
+
+    async with respx.mock(base_url=BASE, assert_all_called=False) as m:
+        m.post("/charts/intraday").mock(side_effect=handler)
+        c = DhanClient(BASE, "cid", "tok")
+        await c.intraday("543150", "BSE_EQ", 1, "2026-04-24T09:25:00", "2026-04-24T09:30:00")
+        await c.close()
+
+    assert captured["body"]["fromDate"] == "2026-04-24 09:25:00"
+    assert captured["body"]["toDate"] == "2026-04-24 09:30:00"
+    assert "T" not in captured["body"]["fromDate"]
