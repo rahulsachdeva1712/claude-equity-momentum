@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Equity Momentum Rebalance</title>
+  <title>Equity Momentum Trader</title>
   <link rel="stylesheet" href="/static/app.css">
   <script src="https://unpkg.com/htmx.org@1.9.12" integrity="sha384-ujb1lZYygJmzgSwoxRggbCHcjc0rB2XoQrxeTUQyRjrOnlCoYta87iKBWq3EsdM2" crossorigin="anonymous"></script>
   <script src="https://cdn.plot.ly/plotly-2.30.0.min.js"></script>
@@ -12,11 +12,9 @@
   {% include "partials/top_bar.html" %}
 
   <main>
-    <h1 class="app-title">Equity Momentum Rebalance Backtester</h1>
+    <h1 class="app-title">Equity Momentum Trader</h1>
 
     <nav class="tabs">
-      <a href="/overview" class="{% if request.url.path == '/overview' %}active{% endif %}">Overview</a>
-      <a href="/trades"   class="{% if request.url.path == '/trades'   %}active{% endif %}">Trades</a>
       <a href="/paper"    class="{% if request.url.path == '/paper'    %}active{% endif %}">Paper Trading</a>
       <a href="/live"     class="{% if request.url.path == '/live'     %}active{% endif %}">Live Trading</a>
       <a href="/config"   class="{% if request.url.path == '/config'   %}active{% endif %}">Config</a>

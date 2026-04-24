@@ -139,13 +139,18 @@ def static_eligible_symbols(
     metrics: pd.DataFrame,
     session_date: date,
     cfg: StrategyConfig = DEFAULT_CONFIG,
+    reference_date: date | None = None,
 ) -> list[str]:
-    """Symbols that pass the static (non-volume) eligibility filters on
-    `session_date`. Used by the trading job to narrow the set of symbols for
-    which intraday 09:25–09:29 candles need to be fetched before the final
-    volume gate is applied.
+    """Symbols that pass the static (non-volume) eligibility filters.
+
+    `session_date` is the date the rebalance is stored under. `reference_date`
+    is the completed-day EoD bar that the ranking/filtering reads from; it
+    defaults to `session_date` (the backtest case) but in live trading at
+    09:30 IST today's EoD bar hasn't been published yet, so the caller passes
+    the latest bar present in `metrics` (typically the prior trading day).
     """
-    day = metrics[metrics["date"] == pd.Timestamp(session_date)]
+    ref = reference_date if reference_date is not None else session_date
+    day = metrics[metrics["date"] == pd.Timestamp(ref)]
     if day.empty:
         return []
     mask = day.apply(lambda r: _static_eligible_mask(r, cfg), axis=1)
@@ -191,12 +196,16 @@ def build_target_set(
     capital: float,
     cfg: StrategyConfig = DEFAULT_CONFIG,
     intraday_volumes: dict[str, float] | None = None,
+    reference_date: date | None = None,
 ) -> TargetSet:
     """Run selection + sizing for a given session_date. FRD A.6, A.7, A.10.
 
     `metrics` is the output of compute_universe_metrics. `capital` is the cash
-    available to deploy on this rebalance. `session_date` is the date whose
-    completed-day close is used as the reference and execution price.
+    available to deploy on this rebalance. `session_date` is the date the
+    signals are stored under. `reference_date` is the completed-day EoD bar
+    the ranking reads from; defaults to session_date (backtest case). In live
+    trading at 09:30 IST, today's EoD bar doesn't exist yet, so the caller
+    passes the latest bar present in metrics (typically prior trading day).
 
     `intraday_volumes` is a dict mapping symbol -> `vol_0925_0930` (summed
     traded volume across the five one-minute candles ending at 09:30 IST on
@@ -205,7 +214,8 @@ def build_target_set(
     the volume filter is part of eligibility, so the top-5 is ranked from the
     volume-qualified set only.
     """
-    day = metrics[metrics["date"] == pd.Timestamp(session_date)]
+    ref = reference_date if reference_date is not None else session_date
+    day = metrics[metrics["date"] == pd.Timestamp(ref)]
     if day.empty:
         return TargetSet(session_date=session_date, rows=(), capital=capital)
 

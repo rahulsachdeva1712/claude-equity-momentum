@@ -1,7 +1,6 @@
 <header class="top-bar" hx-get="/partials/top-bar" hx-trigger="every 5s" hx-swap="outerHTML">
   <div class="brand">
-    <strong>Equity Momentum Rebalance</strong>
-    <span class="muted">&nbsp;&middot;&nbsp;{{ now }}</span>
+    <span class="muted">{{ now }}</span>
   </div>
   <div class="pills">
     <span class="pill {% if bar.worker_alive %}ok{% else %}bad{% endif %}">

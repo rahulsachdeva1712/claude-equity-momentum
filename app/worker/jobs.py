@@ -472,13 +472,27 @@ async def execution_job(
 
         metrics = compute_universe_metrics(panel, DEFAULT_CONFIG)
 
+        # At 09:30 IST today's EoD bar hasn't been published yet, so rank and
+        # filter against the latest *completed* daily bar present in the panel
+        # (typically the prior trading day). `sess` stays as today for
+        # persistence (signals.session_date, paper_orders.session_date, etc.).
+        if metrics.empty or metrics["date"].isna().all():
+            raise_alert(conn, Alert(severity="warn", source="jobs", message="no dated metrics; skip"))
+            return
+        ref_date = metrics["date"].max().date()
+        if ref_date != sess:
+            log.info(
+                "using reference_date=%s for signal generation (today=%s)",
+                ref_date, sess,
+            )
+
         # Step 3: volume gate. Only fetch intraday candles for static-eligibility survivors.
-        static_survivors = set(static_eligible_symbols(metrics, sess, DEFAULT_CONFIG))
+        static_survivors = set(static_eligible_symbols(metrics, sess, DEFAULT_CONFIG, reference_date=ref_date))
         intraday_volumes = await _fetch_0925_0930_volumes(dhan, universe, sess, static_survivors)
 
         # Step 4: build target set (applies static filters + volume gate + ranking + sizing).
         capital = capital_override if capital_override is not None else _capital_for(conn)
-        target = build_target_set(metrics, sess, capital=capital, intraday_volumes=intraday_volumes)
+        target = build_target_set(metrics, sess, capital=capital, intraday_volumes=intraday_volumes, reference_date=ref_date)
 
         # Step 5: persist signals and generate paper orders.
         with tx(conn):

@@ -129,41 +129,6 @@ def create_app() -> FastAPI:
         return Response(content=buf.getvalue(), media_type="text/csv",
                         headers={"Content-Disposition": "attachment; filename=paper-trade-log.csv"})
 
-    @app.get("/overview", response_class=HTMLResponse)
-    async def overview(request: Request):
-        """Portfolio-level summary: tiles for paper + live side by side,
-        recent alerts, worker status. Reuses existing read-model."""
-        conn = connect()
-        try:
-            ctx = _context(request)
-            sess = session_date_for(now_ist())
-            ctx.update(
-                {
-                    "paper_summary": views.paper_summary_rich(conn),
-                    "live_summary": views.live_summary(conn),
-                    "today": views.today_status(conn, sess),
-                }
-            )
-            return templates.TemplateResponse(request, "overview.html", ctx)
-        finally:
-            conn.close()
-
-    @app.get("/trades", response_class=HTMLResponse)
-    async def trades(request: Request):
-        """All paper + live fills in one place, newest-first."""
-        conn = connect()
-        try:
-            ctx = _context(request)
-            ctx.update(
-                {
-                    "paper_fills": views.recent_fills(conn, "paper", limit=500),
-                    "live_fills": views.recent_fills(conn, "live", limit=500),
-                }
-            )
-            return templates.TemplateResponse(request, "trades.html", ctx)
-        finally:
-            conn.close()
-
     @app.get("/config", response_class=HTMLResponse)
     async def config_tab(request: Request):
         """Read-only view of the Champion B strategy config + state paths."""
