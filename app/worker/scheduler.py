@@ -10,6 +10,7 @@ from apscheduler.triggers.cron import CronTrigger
 from app.dhan.client import DhanClient
 from app.time_utils import IST
 from app.worker.jobs import (
+    command_inbox_job,
     execution_job,
     market_status_poll_job,
     recon_job,
@@ -53,5 +54,11 @@ def build_scheduler(dhan: DhanClient) -> AsyncIOScheduler:
     scheduler.add_job(
         market_status_poll_job, CronTrigger(second="*/30", timezone=IST),
         args=(dhan,), id="market_status", coalesce=True, max_instances=1,
+    )
+    # Command inbox poll (FRD B.2). 2-second cadence; matches the doc's
+    # "2-second cadence from worker" note for UI → worker signalling.
+    scheduler.add_job(
+        command_inbox_job, CronTrigger(second="*/2", timezone=IST),
+        args=(dhan,), id="command_inbox", coalesce=True, max_instances=1,
     )
     return scheduler

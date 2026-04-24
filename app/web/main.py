@@ -20,7 +20,7 @@ from fastapi.templating import Jinja2Templates
 from app.alerts import acknowledge
 from app.db import connect, init_db
 from app.live.engine import is_live_enabled, set_live_enabled
-from app.paths import env_file, log_file, pid_file
+from app.paths import command_inbox, env_file, log_file, pid_file
 from app.pidfile import AlreadyRunning, PidFile, check_stale
 from app.redaction import configure_logging
 from app.settings import load_settings
@@ -124,6 +124,21 @@ def create_app() -> FastAPI:
         finally:
             conn.close()
         return RedirectResponse(url="/paper", status_code=303)
+
+    @app.post("/actions/run-rebalance")
+    async def run_rebalance(request: Request):
+        """Drop a sentinel in run/commands/ so the worker's command_inbox
+        job picks it up within ~2s. FRD B.2 / B.13. We do NOT call the
+        execution path from the web process (single-writer rule).
+
+        The redirect target is the referrer when available so the user
+        stays on whichever tab they clicked from.
+        """
+        inbox = command_inbox()
+        inbox.mkdir(parents=True, exist_ok=True)
+        (inbox / "run_rebalance.now").touch()
+        referer = request.headers.get("referer")
+        return RedirectResponse(url=referer or "/paper", status_code=303)
 
     @app.post("/alerts/{alert_id}/ack")
     async def ack(alert_id: int):

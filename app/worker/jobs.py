@@ -24,7 +24,7 @@ from app.paper.engine import (
     execute_orders as paper_execute,
     generate_orders as paper_generate,
 )
-from app.paths import artifact_file, env_file
+from app.paths import artifact_file, command_inbox, env_file
 from app.strategy.config import DEFAULT_CONFIG
 from app.strategy.signals import (
     build_target_set,
@@ -108,6 +108,133 @@ async def market_status_poll_job(dhan: DhanClient) -> None:
             )
     finally:
         conn.close()
+
+
+COMMAND_RUN_REBALANCE = "run_rebalance.now"
+# Sentinel files older than this are treated as stale — likely the worker
+# was down when the user clicked, and the intent is no longer current.
+COMMAND_MAX_AGE_SECONDS = 300
+
+
+async def command_inbox_job(
+    dhan: DhanClient,
+    provider: UniverseProvider | None = None,
+) -> None:
+    """Poll ``run/commands/`` for one-shot UI signals (FRD B.2).
+
+    Currently handles a single command: ``run_rebalance.now``. Dropping this
+    file is how the web process asks the worker to run the consolidated
+    09:30 signal+execution job off-schedule (manual "run now" button).
+
+    Semantics:
+    - **Idempotency guard still applies (FRD B.13).** If
+      ``sessions.execution_completed_at`` is set for today, the command is
+      rejected with an alert and the file consumed. The user cannot force a
+      second run once paper fills or live orders exist for the day.
+    - **Safety gates still apply.** ``execution_job`` does its own Dhan
+      market-status check; if the market is closed the rebalance is a no-op
+      with an info-level alert, exactly like the scheduled 09:30 run.
+    - **Stale commands rejected.** Files older than ``COMMAND_MAX_AGE_SECONDS``
+      are deleted without running (worker was down when the user clicked;
+      intent is no longer current).
+    - Unknown command files are logged and removed.
+    """
+    inbox = command_inbox()
+    if not inbox.exists():
+        return
+    for p in sorted(inbox.iterdir()):
+        if not p.is_file() or not p.name.endswith(".now"):
+            continue
+        try:
+            age_s = now_ist().timestamp() - p.stat().st_mtime
+        except OSError:
+            continue
+
+        if p.name == COMMAND_RUN_REBALANCE:
+            conn = connect()
+            try:
+                if age_s > COMMAND_MAX_AGE_SECONDS:
+                    raise_alert(
+                        conn,
+                        Alert(
+                            severity="warn",
+                            source="commands",
+                            message=f"run_rebalance command is stale ({int(age_s)}s old); discarded",
+                        ),
+                    )
+                    _safe_unlink(p)
+                    continue
+
+                sess = session_date_for(now_ist())
+                done = conn.execute(
+                    "SELECT execution_completed_at FROM sessions WHERE session_date = ?",
+                    (sess.isoformat(),),
+                ).fetchone()
+                if done and done["execution_completed_at"]:
+                    raise_alert(
+                        conn,
+                        Alert(
+                            severity="warn",
+                            source="commands",
+                            message=f"run_rebalance rejected: execution already completed for {sess.isoformat()}",
+                        ),
+                    )
+                    _safe_unlink(p)
+                    continue
+
+                raise_alert(
+                    conn,
+                    Alert(
+                        severity="info",
+                        source="commands",
+                        message=f"manual run_rebalance triggered for {sess.isoformat()}",
+                    ),
+                )
+            finally:
+                conn.close()
+
+            # Consume the sentinel BEFORE calling execution_job. If the job
+            # raises we still want the file gone so we don't loop-retry on
+            # every 2-second tick.
+            _safe_unlink(p)
+            try:
+                await execution_job(dhan, provider=provider)
+            except Exception as e:  # noqa: BLE001
+                conn = connect()
+                try:
+                    raise_alert(
+                        conn,
+                        Alert(
+                            severity="error",
+                            source="commands",
+                            message=f"manual run_rebalance failed: {type(e).__name__}: {e}",
+                        ),
+                    )
+                finally:
+                    conn.close()
+            continue
+
+        # Unknown command — log, alert, clean up.
+        conn = connect()
+        try:
+            raise_alert(
+                conn,
+                Alert(
+                    severity="warn",
+                    source="commands",
+                    message=f"unknown command file ignored: {p.name}",
+                ),
+            )
+        finally:
+            conn.close()
+        _safe_unlink(p)
+
+
+def _safe_unlink(p: Path) -> None:
+    try:
+        p.unlink()
+    except OSError as e:
+        log.warning("failed to delete command file %s: %s", p, e)
 
 
 async def execution_job(
