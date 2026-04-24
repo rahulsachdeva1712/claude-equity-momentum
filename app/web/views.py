@@ -193,34 +193,48 @@ def _fmt_inr(n: float, decimals: int = 2) -> str:
 
 
 def paper_meta(conn: sqlite3.Connection, session_date: date) -> dict:
-    """Sub-header facts: book start, session start, last-updated."""
-    book_start_row = conn.execute(
-        "SELECT MIN(updated_at) AS t FROM paper_book"
-    ).fetchone()
+    return book_meta(conn, session_date, "paper")
+
+
+def book_meta(conn: sqlite3.Connection, session_date: date, prefix: str = "paper") -> dict:
+    """Sub-header facts: book start, session start, last-updated.
+
+    `prefix` is 'paper' or 'live'. For live, the "book" is derived from the
+    latest live_positions_snapshot row rather than a dedicated table.
+    """
+    if prefix == "paper":
+        book_start_row = conn.execute(
+            "SELECT MIN(updated_at) AS t FROM paper_book"
+        ).fetchone()
+    else:
+        book_start_row = conn.execute(
+            "SELECT MIN(taken_at) AS t FROM live_positions_snapshot"
+        ).fetchone()
     first_fill_row = conn.execute(
-        "SELECT MIN(filled_at) AS t FROM paper_fills"
+        f"SELECT MIN(filled_at) AS t FROM {prefix}_fills"
     ).fetchone()
     book_start = _parse_ts((book_start_row or {}).get("t") if isinstance(book_start_row, dict)
                            else book_start_row["t"] if book_start_row else None) \
         or _parse_ts(first_fill_row["t"] if first_fill_row else None)
 
-    # Session start: 00:00 IST on `session_date` is the neutral answer
-    # (matches reference UI).
     session_start_dt = datetime.combine(session_date, time(0, 0), tzinfo=IST)
 
-    # Last updated: max across the four possible sources.
-    cands: list[datetime | None] = []
-    for sql in (
-        "SELECT MAX(computed_at) AS t FROM paper_pnl_daily",
-        "SELECT MAX(updated_at) AS t FROM paper_book",
-        "SELECT MAX(filled_at) AS t FROM paper_fills",
+    cand_sqls = [
+        f"SELECT MAX(computed_at) AS t FROM {prefix}_pnl_daily",
+        f"SELECT MAX(filled_at) AS t FROM {prefix}_fills",
         "SELECT MAX(fetched_at) AS t FROM live_ltp",
-    ):
+    ]
+    if prefix == "paper":
+        cand_sqls.append("SELECT MAX(updated_at) AS t FROM paper_book")
+    else:
+        cand_sqls.append("SELECT MAX(taken_at) AS t FROM live_positions_snapshot")
+
+    cands: list[datetime | None] = []
+    for sql in cand_sqls:
         try:
             row = conn.execute(sql).fetchone()
             cands.append(_parse_ts(row["t"]) if row and row["t"] else None)
         except sqlite3.OperationalError:
-            # Table may not exist yet on fresh installs.
             continue
     last_updated = max((c for c in cands if c is not None), default=None)
 
@@ -232,9 +246,13 @@ def paper_meta(conn: sqlite3.Connection, session_date: date) -> dict:
 
 
 def _chronological_paper_fills(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    return _chronological_fills(conn, "paper")
+
+
+def _chronological_fills(conn: sqlite3.Connection, prefix: str = "paper") -> list[sqlite3.Row]:
     return conn.execute(
-        "SELECT id, session_date, symbol, side, fill_qty, fill_price, charges_total,"
-        " charges_json, filled_at FROM paper_fills ORDER BY filled_at, id"
+        f"SELECT id, session_date, symbol, side, fill_qty, fill_price, charges_total,"
+        f" charges_json, filled_at FROM {prefix}_fills ORDER BY filled_at, id"
     ).fetchall()
 
 
@@ -291,15 +309,24 @@ def _replay_closed_trades(fills: list[sqlite3.Row]) -> list[dict]:
 
 
 def paper_summary_rich(conn: sqlite3.Connection) -> dict:
+    return summary_rich(conn, "paper")
+
+
+def live_summary_rich(conn: sqlite3.Connection) -> dict:
+    return summary_rich(conn, "live")
+
+
+def summary_rich(conn: sqlite3.Connection, prefix: str = "paper") -> dict:
     """Full KPI set including win-rate, profit factor, drawdown, etc.
 
-    Returns a superset of paper_summary(). Safe to compute on an empty DB.
+    Returns a superset of `_summary(prefix)`. Safe to compute on an empty DB.
+    Accepts 'paper' or 'live' to drive the same UI off either book.
     """
-    base = paper_summary(conn)
-    fills = _chronological_paper_fills(conn)
+    base = _summary(conn, prefix)
+    fills = _chronological_fills(conn, prefix)
     closed = _replay_closed_trades(fills)
 
-    pnl_series = pnl_timeseries(conn, "paper", limit=10000)
+    pnl_series = pnl_timeseries(conn, prefix, limit=10000)
 
     n = len(closed)
     wins = [c for c in closed if c["pnl_net"] > 0]
@@ -406,18 +433,30 @@ def paper_summary_rich(conn: sqlite3.Connection) -> dict:
     return base
 
 
-def today_status(conn: sqlite3.Connection, session_date: date) -> dict:
-    """One-row summary of today's paper session, for the Today Status band."""
-    book = conn.execute(
-        "SELECT COUNT(*) AS c, COALESCE(SUM(cost_basis),0) AS invest, MAX(updated_at) AS t"
-        " FROM paper_book"
-    ).fetchone()
+def today_status(conn: sqlite3.Connection, session_date: date, prefix: str = "paper") -> dict:
+    """One-row summary of today's session, for the Today Status band.
+
+    `prefix` is 'paper' or 'live'. Live book comes from the latest
+    live_positions_snapshot rather than a dedicated table.
+    """
+    if prefix == "paper":
+        book = conn.execute(
+            "SELECT COUNT(*) AS c, COALESCE(SUM(cost_basis),0) AS invest, MAX(updated_at) AS t"
+            " FROM paper_book"
+        ).fetchone()
+    else:
+        # Live book: sum qty*avg_cost on the latest snapshot.
+        book = conn.execute(
+            "SELECT COUNT(*) AS c, COALESCE(SUM(qty*avg_cost),0) AS invest, MAX(taken_at) AS t"
+            " FROM live_positions_snapshot"
+            " WHERE taken_at = (SELECT MAX(taken_at) FROM live_positions_snapshot)"
+        ).fetchone()
     today_pnl = conn.execute(
-        "SELECT realized, unrealized, mtm, computed_at FROM paper_pnl_daily WHERE session_date = ?",
+        f"SELECT realized, unrealized, mtm, computed_at FROM {prefix}_pnl_daily WHERE session_date = ?",
         (session_date.isoformat(),),
     ).fetchone()
     today_buys = conn.execute(
-        "SELECT COUNT(*) AS c FROM paper_fills WHERE session_date = ? AND side = 'BUY'",
+        f"SELECT COUNT(*) AS c FROM {prefix}_fills WHERE session_date = ? AND side = 'BUY'",
         (session_date.isoformat(),),
     ).fetchone()["c"]
 
@@ -452,9 +491,12 @@ def today_status(conn: sqlite3.Connection, session_date: date) -> dict:
     }
 
 
-def performance_summary(conn: sqlite3.Connection) -> list[list[dict]]:
-    """3-column metric grid matching the reference screenshot."""
-    s = paper_summary_rich(conn)
+def performance_summary(conn: sqlite3.Connection, prefix: str = "paper") -> list[list[dict]]:
+    """3-column metric grid matching the reference screenshot.
+
+    `prefix` is 'paper' or 'live'.
+    """
+    s = summary_rich(conn, prefix)
 
     def inr(n: float, d: int = 2) -> str:
         if n != n or n in (float("inf"), float("-inf")):
@@ -524,14 +566,33 @@ def signals_today_brief(conn: sqlite3.Connection, session_date: date) -> list[di
 
 
 def paper_book_rich(conn: sqlite3.Connection) -> list[dict]:
-    """Current paper book with marked price, market value, unrealized P&L.
+    return book_rich(conn, "paper")
+
+
+def live_book_rich(conn: sqlite3.Connection) -> list[dict]:
+    return book_rich(conn, "live")
+
+
+def book_rich(conn: sqlite3.Connection, prefix: str = "paper") -> list[dict]:
+    """Current book with marked price, market value, unrealized P&L.
 
     Marked price priority: live_ltp (fresh) → last-known fill price for the
     symbol → avg_cost (falls back to 0 unrealized when nothing else is known).
+
+    For `prefix="live"` the "book" is derived from the latest
+    live_positions_snapshot and cost_basis is qty * avg_cost.
     """
-    book = conn.execute(
-        "SELECT symbol, qty, avg_cost, cost_basis, updated_at FROM paper_book ORDER BY symbol"
-    ).fetchall()
+    if prefix == "paper":
+        book = conn.execute(
+            "SELECT symbol, qty, avg_cost, cost_basis, updated_at FROM paper_book ORDER BY symbol"
+        ).fetchall()
+    else:
+        book = conn.execute(
+            "SELECT symbol, qty, avg_cost, (qty*avg_cost) AS cost_basis, taken_at AS updated_at"
+            " FROM live_positions_snapshot"
+            " WHERE taken_at = (SELECT MAX(taken_at) FROM live_positions_snapshot)"
+            " ORDER BY symbol"
+        ).fetchall()
     if not book:
         return []
 
@@ -545,7 +606,7 @@ def paper_book_rich(conn: sqlite3.Connection) -> list[dict]:
 
     last_buy: dict[str, dict] = {}
     for r in conn.execute(
-        "SELECT symbol, fill_price, filled_at FROM paper_fills WHERE side='BUY' ORDER BY filled_at"
+        f"SELECT symbol, fill_price, filled_at FROM {prefix}_fills WHERE side='BUY' ORDER BY filled_at"
     ):
         last_buy[r["symbol"]] = {"fill_price": float(r["fill_price"]), "filled_at": r["filled_at"]}
 
@@ -610,13 +671,15 @@ def paper_book_rich(conn: sqlite3.Connection) -> list[dict]:
     return out
 
 
-def day_grouped_trade_log(conn: sqlite3.Connection, limit_days: int = 30) -> list[dict]:
+def day_grouped_trade_log(conn: sqlite3.Connection, limit_days: int = 30, prefix: str = "paper") -> list[dict]:
     """Trades grouped by session_date with running portfolio value and
     per-fill details. Matches the reference screenshot's 'Trade log'.
+
+    `prefix` is 'paper' or 'live'.
     """
     fills = conn.execute(
-        "SELECT id, session_date, symbol, side, fill_qty, fill_price, charges_total,"
-        " charges_json, filled_at FROM paper_fills ORDER BY filled_at, id"
+        f"SELECT id, session_date, symbol, side, fill_qty, fill_price, charges_total,"
+        f" charges_json, filled_at FROM {prefix}_fills ORDER BY filled_at, id"
     ).fetchall()
     if not fills:
         return []

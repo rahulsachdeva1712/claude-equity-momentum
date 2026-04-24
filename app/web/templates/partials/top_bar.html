@@ -1,18 +1,55 @@
 <header class="top-bar" hx-get="/partials/top-bar" hx-trigger="every 5s" hx-swap="outerHTML">
   <div class="brand">
-    <span class="muted">{{ now }}</span>
+    <span class="brand-name">Equity Momentum Trader</span>
+    <span class="muted time">{{ now }}</span>
   </div>
   <div class="pills">
     <span class="pill {% if bar.worker_alive %}ok{% else %}bad{% endif %}">
       worker: {{ 'running' if bar.worker_alive else 'stopped' }}
     </span>
-    <span class="pill token-{{ bar.token_state }}">token: {{ bar.token_label }}</span>
-    <span class="pill market-{{ bar.market_status }}">market: {{ bar.market_status }}</span>
-    <span class="pill {% if bar.live_enabled %}live-on{% else %}live-off{% endif %}">
-      live: {{ 'ON' if bar.live_enabled else 'OFF' }}
+    <span class="pill token-{{ bar.token_state }}" title="{{ bar.token_label }}">
+      token: {{ bar.token_state }}
     </span>
-    <button class="icon-btn" onclick="document.getElementById('settingsModal').classList.add('open')">
-      settings{% if bar.unacked_alerts %} ({{ bar.unacked_alerts }}){% endif %}
-    </button>
+    <span class="pill market-{{ bar.market_status }}">market: {{ bar.market_status }}</span>
+
+    <form method="post" action="/settings/live-enabled" class="inline-form">
+      {% if bar.live_enabled %}
+        <input type="hidden" name="enabled" value="0">
+        <button type="submit" class="pill pill-btn live-on"
+                title="Live trading is ON — click to halt new placements.">
+          live: ON
+        </button>
+      {% else %}
+        <input type="hidden" name="enabled" value="1">
+        <button type="submit" class="pill pill-btn live-off"
+                title="Live trading is OFF — click to enable.">
+          live: OFF
+        </button>
+      {% endif %}
+    </form>
+
+    <details class="alerts-dropdown">
+      <summary class="pill {% if bar.unacked_alerts %}bad{% endif %}">
+        alerts{% if bar.unacked_alerts %} ({{ bar.unacked_alerts }}){% endif %}
+      </summary>
+      <div class="alerts-pop">
+        {% if alerts %}
+          <ul class="alerts">
+            {% for a in alerts %}
+              <li class="alert alert-{{ a.severity }}">
+                <span class="sev">{{ a.severity }}</span>
+                <span class="src">{{ a.source }}</span>
+                <span class="msg">{{ a.message }}</span>
+                <form method="post" action="/alerts/{{ a.id }}/ack" class="inline-form">
+                  <button class="btn-small" type="submit">ack</button>
+                </form>
+              </li>
+            {% endfor %}
+          </ul>
+        {% else %}
+          <p class="muted" style="margin:0">No alerts.</p>
+        {% endif %}
+      </div>
+    </details>
   </div>
 </header>

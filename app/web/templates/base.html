@@ -12,17 +12,13 @@
   {% include "partials/top_bar.html" %}
 
   <main>
-    <h1 class="app-title">Equity Momentum Trader</h1>
-
     <nav class="tabs">
-      <a href="/paper"    class="{% if request.url.path == '/paper'    %}active{% endif %}">Paper Trading</a>
-      <a href="/live"     class="{% if request.url.path == '/live'     %}active{% endif %}">Live Trading</a>
-      <a href="/config"   class="{% if request.url.path == '/config'   %}active{% endif %}">Config</a>
+      <a href="/paper"  class="{% if request.url.path == '/paper'  %}active{% endif %}">Paper Trading</a>
+      <a href="/live"   class="{% if request.url.path == '/live'   %}active{% endif %}">Live Trading</a>
+      <a href="/config" class="{% if request.url.path == '/config' %}active{% endif %}">Config</a>
     </nav>
 
     {% block content %}{% endblock %}
   </main>
-
-  {% include "partials/settings_modal.html" %}
 </body>
 </html>

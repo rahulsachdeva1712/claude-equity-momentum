@@ -77,36 +77,40 @@ def create_app() -> FastAPI:
     async def root():
         return RedirectResponse(url="/paper")
 
-    @app.get("/paper", response_class=HTMLResponse)
-    async def paper(request: Request):
+    def _rebalance_ctx(request: Request, prefix: str) -> dict:
+        """Shared view-model for the Paper and Live tabs. Same shape both
+        sides so the two pages extend the same partial template."""
         conn = connect()
         try:
             ctx = _context(request)
             sess = session_date_for(now_ist())
             ctx.update(
                 {
-                    "summary": views.paper_summary_rich(conn),
+                    "prefix": prefix,
+                    "hx_url": f"/{prefix}",
+                    "export_url": f"/{prefix}/export/trade-log.csv",
+                    "page_title": "Paper Trading" if prefix == "paper" else "Live Trading",
+                    "summary": views.summary_rich(conn, prefix),
                     "signals": views.signals_for(conn, sess),
                     "signals_brief": views.signals_today_brief(conn, sess),
-                    "book": views.paper_book_rich(conn),
-                    "pnl_series": views.pnl_timeseries(conn, "paper"),
-                    "fills": views.recent_fills(conn, "paper"),
-                    "meta": views.paper_meta(conn, sess),
-                    "today": views.today_status(conn, sess),
-                    "perf": views.performance_summary(conn),
-                    "trade_log": views.day_grouped_trade_log(conn),
+                    "book": views.book_rich(conn, prefix),
+                    "pnl_series": views.pnl_timeseries(conn, prefix),
+                    "fills": views.recent_fills(conn, prefix),
+                    "meta": views.book_meta(conn, sess, prefix),
+                    "today": views.today_status(conn, sess, prefix),
+                    "perf": views.performance_summary(conn, prefix),
+                    "trade_log": views.day_grouped_trade_log(conn, prefix=prefix),
+                    "live_on": ctx["bar"]["live_enabled"],
                 }
             )
-            return templates.TemplateResponse(request, "paper.html", ctx)
+            return ctx
         finally:
             conn.close()
 
-    @app.get("/paper/export/trade-log.csv")
-    async def export_trade_log():
-        """Export the full paper trade log as CSV (all sessions)."""
+    def _render_trade_log_csv(prefix: str) -> Response:
         conn = connect()
         try:
-            groups = views.day_grouped_trade_log(conn, limit_days=10_000)
+            groups = views.day_grouped_trade_log(conn, limit_days=10_000, prefix=prefix)
         finally:
             conn.close()
         buf = io.StringIO()
@@ -127,7 +131,20 @@ def create_app() -> FastAPI:
                     g["portfolio_value"],
                 ])
         return Response(content=buf.getvalue(), media_type="text/csv",
-                        headers={"Content-Disposition": "attachment; filename=paper-trade-log.csv"})
+                        headers={"Content-Disposition": f"attachment; filename={prefix}-trade-log.csv"})
+
+    @app.get("/paper", response_class=HTMLResponse)
+    async def paper(request: Request):
+        ctx = _rebalance_ctx(request, "paper")
+        return templates.TemplateResponse(request, "paper.html", ctx)
+
+    @app.get("/paper/export/trade-log.csv")
+    async def export_paper_trade_log():
+        return _render_trade_log_csv("paper")
+
+    @app.get("/live/export/trade-log.csv")
+    async def export_live_trade_log():
+        return _render_trade_log_csv("live")
 
     @app.get("/config", response_class=HTMLResponse)
     async def config_tab(request: Request):
@@ -149,21 +166,8 @@ def create_app() -> FastAPI:
 
     @app.get("/live", response_class=HTMLResponse)
     async def live(request: Request):
-        conn = connect()
-        try:
-            ctx = _context(request)
-            ctx.update(
-                {
-                    "summary": views.live_summary(conn),
-                    "positions": views.live_positions(conn),
-                    "pnl_series": views.pnl_timeseries(conn, "live"),
-                    "fills": views.recent_fills(conn, "live"),
-                    "live_on": ctx["bar"]["live_enabled"],
-                }
-            )
-            return templates.TemplateResponse(request, "live.html", ctx)
-        finally:
-            conn.close()
+        ctx = _rebalance_ctx(request, "live")
+        return templates.TemplateResponse(request, "live.html", ctx)
 
     @app.get("/partials/top-bar", response_class=HTMLResponse)
     async def top_bar(request: Request):
