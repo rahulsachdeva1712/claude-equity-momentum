@@ -42,7 +42,7 @@ echo "$WORKER_BG" > "$STATE_DIR/run/launcher-worker.bgpid"
 echo "$WEB_BG"    > "$STATE_DIR/run/launcher-web.bgpid"
 
 sleep 2
-URL="http://127.0.0.1:8765"
+URL="http://127.0.0.1:8766"
 if command -v xdg-open >/dev/null; then xdg-open "$URL" >/dev/null 2>&1 || true
 elif command -v open >/dev/null; then open "$URL" >/dev/null 2>&1 || true
 fi
