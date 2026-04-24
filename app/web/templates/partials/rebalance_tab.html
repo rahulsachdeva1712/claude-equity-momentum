@@ -13,12 +13,19 @@
   <div class="tab-header">
     <h2 class="page-title">{{ page_title }}</h2>
     <div class="header-actions">
+      {% if execution_done %}
+      <button type="button" class="btn" disabled
+              title="Today's rebalance has already run. Single-run-per-session is enforced (FRD B.13); button re-enables tomorrow.">
+        Refresh {{ page_title }} (done for today)
+      </button>
+      {% else %}
       <form method="post" action="/actions/run-rebalance" class="inline-form">
         <button type="submit" class="btn"
                 title="Drop a sentinel for the worker to run the 09:30 rebalance off-schedule (FRD B.13).">
           Refresh {{ page_title }}
         </button>
       </form>
+      {% endif %}
     </div>
   </div>
 

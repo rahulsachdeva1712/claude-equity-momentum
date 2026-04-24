@@ -89,6 +89,10 @@ a { color: var(--accent); }
   color: var(--fg);
 }
 .btn:hover { background: #1f2937; border-color: #475569; }
+.btn[disabled], .btn:disabled {
+  opacity: 0.5; cursor: not-allowed; background: var(--card); color: var(--muted);
+}
+.btn[disabled]:hover { background: var(--card); border-color: var(--border-strong); }
 .btn.primary { background: var(--accent); color: #fff; border-color: transparent; }
 .btn.danger  { background: var(--bad); color: #fff; border-color: transparent; }
 .btn-sm { padding: 4px 10px; font-size: 12px; }

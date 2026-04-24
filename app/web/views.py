@@ -77,6 +77,20 @@ def live_summary(conn: sqlite3.Connection) -> dict:
     return _summary(conn, "live")
 
 
+def execution_done_today(conn: sqlite3.Connection, session_date: date) -> bool:
+    """True iff ``sessions.execution_completed_at`` is set for today.
+
+    Used by the UI to disable the manual "Refresh" button — the idempotency
+    guard (FRD B.13) blocks re-runs on the same session anyway, so making
+    the button obviously inert avoids spamming rejected-sentinel alerts.
+    """
+    row = conn.execute(
+        "SELECT execution_completed_at FROM sessions WHERE session_date = ?",
+        (session_date.isoformat(),),
+    ).fetchone()
+    return bool(row and row["execution_completed_at"])
+
+
 def signals_for(conn: sqlite3.Connection, session_date: date) -> list[dict]:
     rows = conn.execute(
         "SELECT symbol, rank_by_126d, target_qty, target_weight, reference_price, selected"

@@ -93,8 +93,10 @@ async def test_inbox_job_rejects_after_completion(state_dir, monkeypatch):
 
     assert call_count["n"] == 0
     assert not (inbox / COMMAND_RUN_REBALANCE).exists()
-    # One alert with source='commands' should have been raised.
-    assert _count_alerts("commands") >= 1
+    # The UI disables the Refresh button once today's execution is complete;
+    # a sentinel that slips through (stale file / race) is silently dropped —
+    # no alert, to keep the pill from filling up with expected rejections.
+    assert _count_alerts("commands") == 0
 
 
 @pytest.mark.asyncio

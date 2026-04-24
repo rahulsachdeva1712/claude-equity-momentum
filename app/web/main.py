@@ -101,6 +101,7 @@ def create_app() -> FastAPI:
                     "perf": views.performance_summary(conn, prefix),
                     "trade_log": views.day_grouped_trade_log(conn, prefix=prefix),
                     "live_on": ctx["bar"]["live_enabled"],
+                    "execution_done": views.execution_done_today(conn, sess),
                 }
             )
             return ctx

@@ -313,13 +313,13 @@ async def command_inbox_job(
                     (sess.isoformat(),),
                 ).fetchone()
                 if done and done["execution_completed_at"]:
-                    raise_alert(
-                        conn,
-                        Alert(
-                            severity="warn",
-                            source="commands",
-                            message=f"run_rebalance rejected: execution already completed for {sess.isoformat()}",
-                        ),
+                    # Expected: the UI disables the Refresh button once today's
+                    # execution completes (FRD B.13). Log-only — no alert, the
+                    # user doesn't need a WARN for clicking a button we left
+                    # clickable during a race / stale sentinel.
+                    log.info(
+                        "run_rebalance sentinel ignored: execution already completed for %s",
+                        sess,
                     )
                     _safe_unlink(p)
                     continue
