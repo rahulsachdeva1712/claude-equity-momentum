@@ -25,15 +25,17 @@ from app.time_utils import IST
 
 def _summary(conn: sqlite3.Connection, prefix: str) -> dict:
     """Prefix is 'paper' or 'live'. Returns headline tiles."""
+    # Headline "cumulative realized" excludes non-broker charges — those
+    # surface as a Trade Log footer total, not in the tile math. Keeps the
+    # tile consistent with paper.engine.compute_daily_pnl and the per-day
+    # Trade Log replay below.
     fills = conn.execute(
-        f"SELECT side, fill_qty, fill_price, charges_total FROM {prefix}_fills"
+        f"SELECT side, fill_qty, fill_price FROM {prefix}_fills"
     ).fetchall()
     realized_total = 0.0
     for r in fills:
         if r["side"] == "SELL":
-            realized_total += r["fill_qty"] * r["fill_price"] - r["charges_total"]
-        else:
-            realized_total -= r["charges_total"]
+            realized_total += r["fill_qty"] * r["fill_price"]
 
     latest = conn.execute(
         f"SELECT realized, unrealized, mtm FROM {prefix}_pnl_daily"
@@ -272,31 +274,28 @@ def _chronological_fills(conn: sqlite3.Connection, prefix: str = "paper") -> lis
 
 def _replay_closed_trades(fills: list[sqlite3.Row]) -> list[dict]:
     """Walk fills in time order. A SELL closes qty against the running avg
-    cost of that symbol. Returns one row per SELL with realized P&L after
-    charges (both legs' charges allocated to this close-leg).
+    cost of that symbol. Returns one row per SELL with realized P&L (gross
+    of non-broker charges — those are reported separately in the trade-log
+    footer so the headline number tracks pure price gain/loss).
 
     Uses avg-cost method (same as paper_book) so the realized figure the
     UI shows matches the book's cost_basis accounting.
     """
-    running: dict[str, dict] = {}  # symbol -> {qty, cost_basis, open_charges}
+    running: dict[str, dict] = {}  # symbol -> {qty, cost_basis}
     closed: list[dict] = []
     for f in fills:
         sym = f["symbol"]
-        state = running.setdefault(sym, {"qty": 0, "cost_basis": 0.0, "charges_pending": 0.0})
+        state = running.setdefault(sym, {"qty": 0, "cost_basis": 0.0})
         if f["side"] == "BUY":
             state["qty"] += int(f["fill_qty"])
             state["cost_basis"] += float(f["fill_qty"]) * float(f["fill_price"])
-            state["charges_pending"] += float(f["charges_total"])
         else:  # SELL
             qty = int(f["fill_qty"])
             if state["qty"] <= 0:
                 # Shouldn't happen in momentum long-only strategy; skip.
                 continue
             avg_cost = state["cost_basis"] / state["qty"] if state["qty"] else 0.0
-            # Allocate a proportional share of the entry charges to this close-leg.
-            alloc = state["charges_pending"] * (qty / state["qty"]) if state["qty"] else 0.0
             pnl_gross = (float(f["fill_price"]) - avg_cost) * qty
-            pnl_net = pnl_gross - float(f["charges_total"]) - alloc
             closed.append(
                 {
                     "session_date": f["session_date"],
@@ -305,20 +304,16 @@ def _replay_closed_trades(fills: list[sqlite3.Row]) -> list[dict]:
                     "avg_cost": avg_cost,
                     "fill_price": float(f["fill_price"]),
                     "pnl_gross": pnl_gross,
-                    "pnl_net": pnl_net,
-                    "charges_sell": float(f["charges_total"]),
-                    "charges_alloc_buy": alloc,
+                    "pnl_net": pnl_gross,  # retained for back-compat; equals gross now
                     "filled_at": f["filled_at"],
-                    "return_pct": (pnl_net / (avg_cost * qty) * 100.0) if avg_cost else 0.0,
+                    "return_pct": (pnl_gross / (avg_cost * qty) * 100.0) if avg_cost else 0.0,
                 }
             )
             # Reduce state.
             state["cost_basis"] -= avg_cost * qty
             state["qty"] -= qty
-            state["charges_pending"] -= alloc
             if state["qty"] == 0:
                 state["cost_basis"] = 0.0
-                state["charges_pending"] = 0.0
     return closed
 
 
@@ -698,31 +693,29 @@ def day_grouped_trade_log(conn: sqlite3.Connection, limit_days: int = 30, prefix
     if not fills:
         return []
 
-    # Replay for per-SELL realized P&L (matches book accounting).
+    # Replay for per-SELL realized P&L. P&L is GROSS of non-broker charges —
+    # those surface in a per-day footer total so the headline cell tracks
+    # pure price gain/loss.
     closed_by_fill_id: dict[int, dict] = {}
     running: dict[str, dict] = {}
     for f in fills:
         sym = f["symbol"]
-        st = running.setdefault(sym, {"qty": 0, "cost_basis": 0.0, "charges_pending": 0.0})
+        st = running.setdefault(sym, {"qty": 0, "cost_basis": 0.0})
         if f["side"] == "BUY":
             st["qty"] += int(f["fill_qty"])
             st["cost_basis"] += float(f["fill_qty"]) * float(f["fill_price"])
-            st["charges_pending"] += float(f["charges_total"])
         else:
             qty = int(f["fill_qty"])
             if st["qty"] <= 0:
                 continue
             avg = st["cost_basis"] / st["qty"] if st["qty"] else 0.0
-            alloc = st["charges_pending"] * (qty / st["qty"]) if st["qty"] else 0.0
-            pnl_net = (float(f["fill_price"]) - avg) * qty - float(f["charges_total"]) - alloc
-            ret_pct = (pnl_net / (avg * qty) * 100.0) if avg else 0.0
-            closed_by_fill_id[int(f["id"])] = {"pnl": pnl_net, "ret_pct": ret_pct, "avg": avg}
+            pnl = (float(f["fill_price"]) - avg) * qty
+            ret_pct = (pnl / (avg * qty) * 100.0) if avg else 0.0
+            closed_by_fill_id[int(f["id"])] = {"pnl": pnl, "ret_pct": ret_pct, "avg": avg}
             st["cost_basis"] -= avg * qty
             st["qty"] -= qty
-            st["charges_pending"] -= alloc
             if st["qty"] == 0:
                 st["cost_basis"] = 0.0
-                st["charges_pending"] = 0.0
 
     # Running cumulative P&L (for portfolio value per day).
     opening_capital = 100_000.0  # display default; reference screenshot uses 1L seed
@@ -731,6 +724,7 @@ def day_grouped_trade_log(conn: sqlite3.Connection, limit_days: int = 30, prefix
     day_rows: dict[str, list[dict]] = defaultdict(list)
     running_pnl_to_end_of_day: dict[str, float] = {}
     per_day_pnl: dict[str, float] = defaultdict(float)
+    per_day_non_broker: dict[str, float] = defaultdict(float)
 
     for f in fills:
         sd = f["session_date"]
@@ -761,6 +755,8 @@ def day_grouped_trade_log(conn: sqlite3.Connection, limit_days: int = 30, prefix
         day_rows[sd].append(row)
         if closed:
             per_day_pnl[sd] += closed["pnl"]
+        if nb is not None:
+            per_day_non_broker[sd] += nb
 
     cum = 0.0
     for sd in days_order:
@@ -772,6 +768,7 @@ def day_grouped_trade_log(conn: sqlite3.Connection, limit_days: int = 30, prefix
     for sd in reversed(days_order[-limit_days:]):
         label_dt = datetime.fromisoformat(sd).replace(tzinfo=IST)
         pv = opening_capital + running_pnl_to_end_of_day[sd]
+        nb_total = per_day_non_broker.get(sd, 0.0)
         groups.append(
             {
                 "session_date": sd,
@@ -779,6 +776,8 @@ def day_grouped_trade_log(conn: sqlite3.Connection, limit_days: int = 30, prefix
                 "portfolio_value": pv,
                 "portfolio_value_str": f"Rs {_fmt_inr(pv)}",
                 "rows": day_rows[sd],
+                "non_broker_charges_total": nb_total,
+                "non_broker_charges_str": f"Rs {nb_total:,.2f}",
             }
         )
     return groups

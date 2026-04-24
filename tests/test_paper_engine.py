@@ -130,8 +130,10 @@ def test_pnl_realized_plus_unrealized(db):
     generate_orders(db, d1)
     execute_orders(db, d1, price_fetcher=lambda s: 100.0)
 
-    # compute PnL with LTP = 110 -> unrealized = 10 * (110-100) = 100 (minus charges)
+    # compute PnL with LTP = 110 -> unrealized = 10 * (110-100) = 100.
+    # Non-broker charges are tracked separately (Trade Log footer) and do
+    # NOT hit realized; BUY-only day → realized must be exactly zero.
     out = compute_daily_pnl(db, d1, ltp_fetcher=lambda s: 110.0)
     assert out["unrealized"] == pytest.approx(100.0)
-    assert out["realized"] < 0  # only buy-side charges
-    assert out["mtm"] < 100.0
+    assert out["realized"] == pytest.approx(0.0)
+    assert out["mtm"] == pytest.approx(100.0)

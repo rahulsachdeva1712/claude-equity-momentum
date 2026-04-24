@@ -221,19 +221,25 @@ def _apply_to_book(conn: sqlite3.Connection, symbol: str, side: Side, qty: int, 
 
 
 def compute_daily_pnl(conn: sqlite3.Connection, session_date: date, ltp_fetcher: PriceFetcher) -> dict:
-    """Realized = sum of sell gains this session; unrealized = book vs LTP."""
+    """Realized = sum of sell gains this session; unrealized = book vs LTP.
+
+    Non-broker charges (STT, exch txn, SEBI, stamp, GST) are **not** deducted
+    from realized P&L — they surface separately at the foot of the Trade Log
+    so the headline numbers track gross gain/loss. Brokerage is zero for Dhan
+    CNC delivery so no broker-fee leakage either.
+    """
     realized = 0.0
     for r in conn.execute(
-        "SELECT symbol, side, fill_qty, fill_price, charges_total FROM paper_fills WHERE session_date = ?",
+        "SELECT symbol, side, fill_qty, fill_price FROM paper_fills WHERE session_date = ?",
         (session_date.isoformat(),),
     ):
         if r["side"] == "SELL":
-            # Approximation: realized = (fill - avg_cost_before) * qty - charges.
-            # For v1 we conservatively treat realized as (fill_price * qty) - charges
-            # minus the retired portion of avg cost, tracked via paper_book.
-            realized += float(r["fill_qty"]) * float(r["fill_price"]) - float(r["charges_total"])
-        else:
-            realized -= float(r["charges_total"])
+            # v1 approximation: treat SELL notional as realized (cost-basis
+            # is tracked via paper_book). Parity with the trade-log replay in
+            # web.views is maintained as long as both exclude charges.
+            realized += float(r["fill_qty"]) * float(r["fill_price"])
+        # BUYs contribute nothing to realized — entries aren't "realized" until
+        # a subsequent SELL closes the leg, and we no longer charge entry fees.
 
     unreal = 0.0
     for r in conn.execute("SELECT symbol, qty, avg_cost FROM paper_book"):

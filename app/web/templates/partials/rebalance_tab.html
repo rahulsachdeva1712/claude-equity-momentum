@@ -242,6 +242,14 @@
         </tr>
         {% endfor %}
       </tbody>
+      <tfoot>
+        <tr class="trade-log-footer">
+          <td colspan="8" class="num muted" style="text-align:right;">
+            <em>Non-broker charges (excluded from P&amp;L above)</em>
+          </td>
+          <td class="num"><strong>Rs {{ '%.2f'|format(group.non_broker_charges_total) }}</strong></td>
+        </tr>
+      </tfoot>
     </table>
   </details>
   {% else %}
