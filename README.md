@@ -38,7 +38,7 @@ chmod 600 ~/.claude-equity-momentum/.env
 
 # Two terminals
 emrb-worker    # scheduler + Dhan writes
-emrb-web       # UI at http://127.0.0.1:8765
+emrb-web       # UI at http://127.0.0.1:8766
 ```
 
 Startup automatically cleans stale PID files from a prior crash

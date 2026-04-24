@@ -64,12 +64,12 @@ timeout /t 2 /nobreak >nul
 start "emrb-web" cmd /k ""%ROOT%.venv\Scripts\emrb-web.exe""
 timeout /t 3 /nobreak >nul
 
-start "" "http://127.0.0.1:8765"
+start "" "http://127.0.0.1:8766"
 
 echo.
 echo =====================================================================
 echo  Equity Momentum Rebalance is running.
-echo  - UI: http://127.0.0.1:8765
+echo  - UI: http://127.0.0.1:8766
 echo  - Stop: run stop.bat (or close the emrb-worker and emrb-web windows)
 echo =====================================================================
 echo.
