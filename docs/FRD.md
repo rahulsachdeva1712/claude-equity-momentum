@@ -167,12 +167,12 @@ UI exposes exactly two tabs: **Paper Trading** and **Live Trading**. A persisten
 
 ## B.2 Process Topology
 
-Two OS processes, one SQLite database, one filesystem state directory `~/.claude-equity-momentum/`.
+Two OS processes, one SQLite database, one filesystem state directory `~/.claude-equity-momentum/`. Credentials live in `<repo>/.env` at the project root (gitignored); the state directory holds only runtime data (db, logs, pid files, artifacts).
 
 | Process | Role | PID file |
 |---|---|---|
 | `worker` | Long-running daemon. Owns all Dhan writes. Runs APScheduler, live reconciliation loop, token expiry watcher, paper book maintenance. Single writer to SQLite. | `run/worker.pid` |
-| `web` | FastAPI + Jinja + HTMX + Plotly. Renders UI. Reads SQLite. Writes only to the `settings` table (kill switch, worker control) and to `~/.claude-equity-momentum/.env` on token update. | `run/web.pid` |
+| `web` | FastAPI + Jinja + HTMX + Plotly. Renders UI. Reads SQLite. Writes only to the `settings` table (kill switch, worker control) and to `<repo>/.env` on token update. | `run/web.pid` |
 
 Scheduler jobs, live reconciliation, and the token watcher are **threads inside the worker process**, not separate OS processes. They share `worker.pid`. Rationale: fewer things to supervise, atomic shutdown, no IPC complexity.
 
@@ -202,7 +202,7 @@ Historical OHLCV is **not** persisted. Each 09:30 run fetches the required daily
 
 ## B.4 Authentication and Credentials
 
-- Access token is stored in `~/.claude-equity-momentum/.env` under `DHAN_ACCESS_TOKEN=...`.
+- Access token is stored in `<repo>/.env` under `DHAN_ACCESS_TOKEN=...`. The file lives at the project root, is gitignored, and is the only place credentials are kept on disk.
 - Other required secrets: `DHAN_CLIENT_ID`.
 - **TOTP secret and PIN are NOT used.** Dhan's official v2 API uses a manually issued access token. Automated TOTP login is unofficial and out of scope.
 - User action: generate a fresh access token from the Dhan web portal each morning and paste it into `.env`. The worker watches the file (mtime polled every 10s) and hot-reloads on change.
@@ -321,10 +321,11 @@ The `correlationId` prefix `emrb:` is the app's ownership marker. Reconciliation
 
 ## B.10 Process Management and Stale Process Handling
 
-**State directory:** `~/.claude-equity-momentum/`
+**Credentials file:** `<repo>/.env` — at the project root, gitignored. The developer edits this by hand to paste the daily Dhan access token. Worker polls mtime every 10s and hot-reloads.
+
+**State directory:** `~/.claude-equity-momentum/` — all runtime state. Kept outside the repo so it survives `git clean` and stays out of `git status`.
 ```
 ~/.claude-equity-momentum/
-  .env                        (secrets, chmod 600, git-ignored)
   state.db                    (SQLite)
   logs/
     worker.log
@@ -435,5 +436,6 @@ Mandatory alert sources:
 | 2026-04-23 | Changed `execution_model` in A.4 from `next_day_open` to `next_day_0930` so the strategy validation model aligns with live fill semantics (D+1 09:30 close, not D+1 open). Added an A.11 note that a daily-bhavcopy-driven validation harness approximates the D+1 09:30 fill with the D+1 open, since bhavcopy carries no intraday prices. | 2-year offline validation run using BSE bhavcopy data as the source. |
 | 2026-04-24 | Rolled Champion B baseline: `rsi_threshold` 75 → 88, `atr_pct_max` 0.04 → 0.05, `sort_metric` `relative_return_126d` → `relative_return_63d`, `max_positions` 5 → 20. Added `weight_scheme` config field; default flipped from the legacy `rel` (weights proportional to `relative_return_252d`) to `inv_atr` (weights proportional to `1 / atr_pct`). Updated A.1, A.4, A.5, A.6, A.7, B.5 to match. DB column `signals.rank_by_126d` keeps its legacy name (no migration); the value is now the rank position under `relative_return_63d`. Driven by the 2-year offline sweep (`research/backtest_2y/sweep3.py` + `verify.py`): Champion B posts 8833 percent / 91.7 percent monthly win / Sharpe 12.2 / MDD -7.7 percent over 2y, walk-forward IS 885 percent → OOS 841 percent at the same win rate, vs. 3354 percent for the old baseline stack. | 2-year offline sweep and walk-forward verification. |
 | 2026-04-24 | `PidFile.acquire()` now runs `os.open` + `msvcrt.locking(LK_NBLCK)` in a worker thread bounded by `LOCK_ACQUIRE_TIMEOUT_S` (15 s) and converts timeouts into a clean `AlreadyRunning`. Added DEBUG breadcrumbs around each stage (stale check, unlink, open+lock, pid-file write) so future hangs are diagnosable. `_safe_unlink` now returns a bool and logs a WARNING when the `.lock` sentinel cannot be removed (opt-in via `warn_on_busy`), instead of silently swallowing. Updated B.10. | Windows runtime bug: after a force-closed `emrb-worker` window, the next worker start hung in userland with zero log output (0.64 s CPU over 3 min) because stale kernel handles on `run/worker.lock` stalled `os.open`/`LK_NBLCK` and the old silent `PermissionError` swallow hid it. |
+| 2026-04-24 | Moved `.env` from the state directory (`~/.claude-equity-momentum/.env`) to the project root (`<repo>/.env`, still gitignored). Runtime state — SQLite db, logs, pid files, artifacts — remains under the state directory. `app/paths.py` gains `project_root()` and `env_file()` now returns `project_root() / '.env'`; `app/settings.py`, `run.bat`, `run.sh`, `README.md`, and B.2 / B.4 / B.10 updated to match. Rationale: users edit `.env` by hand to paste the daily Dhan access token, so keeping it next to the source tree makes it discoverable in an IDE and matches the convention most Python projects follow. | User-reported confusion: token pasted into `<repo>/.env` was not being read because the code looked at the state-dir `.env`. |
 
 Future edits to this FRD must add a row above with the date, the change summary, and the driver.

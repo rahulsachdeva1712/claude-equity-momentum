@@ -19,7 +19,7 @@ pip install -e ".[dev]"
 
 ## Run
 
-**Windows (one-click):** double-click `run.bat`. First run creates the venv, installs deps, and opens Notepad for you to paste Dhan credentials into `%USERPROFILE%\.claude-equity-momentum\.env`. Second run launches worker + web and opens the UI.
+**Windows (one-click):** double-click `run.bat`. First run creates the venv, installs deps, and opens your editor on `.env` at the project root for you to paste Dhan credentials. Second run launches worker + web and opens the UI.
 
 **Linux / macOS (one-click):** `./run.sh`. Same sequence.
 
@@ -31,10 +31,10 @@ pip install -e ".[dev]"
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 
-mkdir -p ~/.claude-equity-momentum
-cp .env.example ~/.claude-equity-momentum/.env
-chmod 600 ~/.claude-equity-momentum/.env
-# edit the file, fill in DHAN_CLIENT_ID and DHAN_ACCESS_TOKEN
+# .env lives at the project root (gitignored). Fill in credentials:
+cp .env.example .env   # if .env doesn't exist yet
+chmod 600 .env
+# edit .env, fill in DHAN_CLIENT_ID and DHAN_ACCESS_TOKEN
 
 # Two terminals
 emrb-worker    # scheduler + Dhan writes
@@ -49,7 +49,7 @@ Startup automatically cleans stale PID files from a prior crash
 ```
 app/
   settings.py          env loading, paths
-  paths.py             ~/.claude-equity-momentum/* helpers
+  paths.py             project-root .env + ~/.claude-equity-momentum/* helpers
   time_utils.py        IST helpers
   pidfile.py           stale-aware PID files
   db.py                SQLite schema

@@ -2,7 +2,7 @@
 rem =======================================================================
 rem  Equity Momentum Rebalance - one-click launcher (Windows)
 rem  - creates venv on first run
-rem  - ensures %USERPROFILE%\.claude-equity-momentum\.env exists
+rem  - ensures <repo>\.env exists (seeded from .env.example)
 rem  - starts worker + web in separate console windows
 rem  - opens the UI in the default browser
 rem  See docs/FRD.md B.2 (process topology) and B.10 (stale PID cleanup).
@@ -41,17 +41,26 @@ if not exist ".venv\Scripts\python.exe" (
     )
 )
 
-rem ---- ensure state dir + .env ------------------------------------------
-set "STATE_DIR=%USERPROFILE%\.claude-equity-momentum"
-if not exist "%STATE_DIR%" mkdir "%STATE_DIR%"
-if not exist "%STATE_DIR%\.env" (
-    copy /y ".env.example" "%STATE_DIR%\.env" >nul
+rem ---- ensure project-root .env ------------------------------------------
+rem Credentials live at the project root (gitignored). Runtime state
+rem (db, logs, pid) stays under %USERPROFILE%\.claude-equity-momentum\.
+if not exist "%ROOT%.env" (
+    if exist "%ROOT%.env.example" (
+        copy /y "%ROOT%.env.example" "%ROOT%.env" >nul
+    ) else (
+        rem Seed a minimal .env if .env.example is missing.
+        (
+            echo # Credentials file. Gitignored. Paste a fresh Dhan access token daily.
+            echo DHAN_CLIENT_ID=
+            echo DHAN_ACCESS_TOKEN=
+        ) > "%ROOT%.env"
+    )
     echo.
     echo First-time setup: paste DHAN_CLIENT_ID and DHAN_ACCESS_TOKEN into
-    echo   %STATE_DIR%\.env
+    echo   %ROOT%.env
     echo Then re-run this file.
     echo.
-    notepad "%STATE_DIR%\.env"
+    notepad "%ROOT%.env"
     popd & exit /b 0
 )
 
