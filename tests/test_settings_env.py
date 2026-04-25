@@ -14,10 +14,10 @@ from app.settings import _load_env_file, load_settings
 @pytest.fixture
 def env_dir(tmp_path, monkeypatch):
     monkeypatch.setenv("EMRB_STATE_DIR", str(tmp_path))
-    # After the .env relocation (PR #9) the file lives at `project_root()/.env`.
-    # Point project_root at tmp_path so these tests remain hermetic and don't
-    # read the developer's real ~/.../claude-equity-momentum/.env.
-    monkeypatch.setattr("app.paths.project_root", lambda: tmp_path)
+    # .env lives at ~/Documents/shared/.env in production. Point the loader
+    # at a tmp_path via the EMRB_ENV_FILE override so these tests remain
+    # hermetic and don't read the developer's real credentials file.
+    monkeypatch.setenv("EMRB_ENV_FILE", str(tmp_path / ".env"))
     # Clear any inherited values so the test sees only what we write.
     for k in ("DHAN_ACCESS_TOKEN", "DHAN_CLIENT_ID"):
         monkeypatch.delenv(k, raising=False)

@@ -19,7 +19,7 @@ pip install -e ".[dev]"
 
 ## Run
 
-**Windows (one-click):** double-click `run.bat`. First run creates the venv, installs deps, and opens your editor on `.env` at the project root for you to paste Dhan credentials. Second run launches worker + web and opens the UI.
+**Windows (one-click):** double-click `run.bat`. First run creates the venv, installs deps, and opens your editor on `%USERPROFILE%\Documents\shared\.env` for you to paste Dhan credentials. Second run launches worker + web and opens the UI.
 
 **Linux / macOS (one-click):** `./run.sh`. Same sequence.
 
@@ -31,10 +31,13 @@ pip install -e ".[dev]"
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 
-# .env lives at the project root (gitignored). Fill in credentials:
-cp .env.example .env   # if .env doesn't exist yet
-chmod 600 .env
-# edit .env, fill in DHAN_CLIENT_ID and DHAN_ACCESS_TOKEN
+# .env lives at ~/Documents/shared/.env so sibling tools running against
+# the same Dhan account share one credentials file. Override with the
+# EMRB_ENV_FILE env var if you want it elsewhere.
+mkdir -p ~/Documents/shared
+cp .env.example ~/Documents/shared/.env   # if it doesn't exist yet
+chmod 600 ~/Documents/shared/.env
+# edit ~/Documents/shared/.env, fill in DHAN_CLIENT_ID and DHAN_ACCESS_TOKEN
 
 # Two terminals
 emrb-worker    # scheduler + Dhan writes
@@ -49,7 +52,7 @@ Startup automatically cleans stale PID files from a prior crash
 ```
 app/
   settings.py          env loading, paths
-  paths.py             project-root .env + ~/.claude-equity-momentum/* helpers
+  paths.py             ~/Documents/shared/.env + ~/.claude-equity-momentum/* helpers
   time_utils.py        IST helpers
   pidfile.py           stale-aware PID files
   db.py                SQLite schema

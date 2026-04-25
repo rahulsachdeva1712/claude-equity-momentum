@@ -26,14 +26,22 @@ def state_dir() -> Path:
 
 
 def env_file() -> Path:
-    """``.env`` lives at the project root (``<repo>/.env``), ignored by git.
+    """``.env`` lives at ``~/Documents/shared/.env`` by default.
 
-    Rationale: the user edits this by hand to paste the daily Dhan access
-    token. Keeping it next to the repo makes it discoverable in an IDE and
-    matches the convention most Python projects follow. ``.gitignore``
-    already excludes ``.env``, so there's no accidental-commit risk.
+    Rationale: one shared credential file for this app + any sibling tools
+    the user runs against the same Dhan account, so pasting a fresh access
+    token each morning updates every consumer at once. Resolved via
+    ``Path.home()`` so the same code works on any machine the repo is
+    checked out on.
+
+    The ``EMRB_ENV_FILE`` environment variable overrides this — useful for
+    tests (which must be hermetic and not read the developer's real token)
+    and for users who want to keep credentials somewhere else.
     """
-    return project_root() / ".env"
+    override = os.environ.get("EMRB_ENV_FILE")
+    if override:
+        return Path(override).expanduser()
+    return Path.home() / "Documents" / "shared" / ".env"
 
 
 def db_file() -> Path:

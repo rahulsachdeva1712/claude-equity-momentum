@@ -13,8 +13,9 @@ from app.paths import env_file
 
 
 def _load_env_file() -> None:
-    """Load ``<repo>/.env`` if present. No-op otherwise.
-    Called at import time; worker also watches this file for hot reload.
+    """Load the shared ``.env`` (see ``app.paths.env_file``) if present.
+    No-op otherwise. Called at import time; worker also watches this file
+    for hot reload.
 
     The file is decoded as utf-8-sig so a Windows BOM (added by Notepad
     when the user pastes the access token) is stripped instead of being

@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 from app.db import connect, init_db
 from app.dhan.client import DhanClient
 from app.paths import command_inbox
-from app.time_utils import now_ist
+from app.time_utils import now_ist, session_date_for
 from app.web.main import create_app
 from app.worker.jobs import (
     COMMAND_MAX_AGE_SECONDS,
@@ -63,8 +63,11 @@ def test_web_endpoint_redirects_to_referer(client):
 
 @pytest.mark.asyncio
 async def test_inbox_job_rejects_after_completion(state_dir, monkeypatch):
-    # Mark today as already executed — the rerun must be refused.
-    sess = date.fromisoformat(now_ist().date().isoformat())
+    # Mark today's *trading* session as already executed — the rerun must be
+    # refused. Use ``session_date_for`` (matches the production guard) so this
+    # passes on weekends and holidays where today's IST date rolls back to the
+    # last trading day.
+    sess = session_date_for(now_ist())
     conn = connect()
     try:
         conn.execute(

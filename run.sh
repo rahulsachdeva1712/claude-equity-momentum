@@ -17,24 +17,29 @@ fi
 STATE_DIR="$HOME/.claude-equity-momentum"
 mkdir -p "$STATE_DIR"
 
-# Credentials live at the project root (gitignored). Runtime state stays
-# in $STATE_DIR (db, logs, pid files).
-if [ ! -f "$ROOT/.env" ]; then
+# Credentials live at $HOME/Documents/shared/.env so the same file can be
+# consumed by sibling tools running against the same Dhan account. Override
+# with the EMRB_ENV_FILE env var if needed. Runtime state stays in
+# $STATE_DIR (db, logs, pid files).
+SHARED_DIR="$HOME/Documents/shared"
+ENV_PATH="$SHARED_DIR/.env"
+mkdir -p "$SHARED_DIR"
+if [ ! -f "$ENV_PATH" ]; then
     if [ -f "$ROOT/.env.example" ]; then
-        cp "$ROOT/.env.example" "$ROOT/.env"
+        cp "$ROOT/.env.example" "$ENV_PATH"
     else
-        cat >"$ROOT/.env" <<'EOF'
-# Credentials file. Gitignored. Paste a fresh Dhan access token daily.
+        cat >"$ENV_PATH" <<'EOF'
+# Credentials file. Paste a fresh Dhan access token daily.
 DHAN_CLIENT_ID=
 DHAN_ACCESS_TOKEN=
 EOF
     fi
-    chmod 600 "$ROOT/.env"
+    chmod 600 "$ENV_PATH"
     echo
     echo "First-time setup: paste DHAN_CLIENT_ID + DHAN_ACCESS_TOKEN into"
-    echo "  $ROOT/.env"
+    echo "  $ENV_PATH"
     echo "Then rerun this script."
-    ${EDITOR:-vi} "$ROOT/.env"
+    ${EDITOR:-vi} "$ENV_PATH"
     exit 0
 fi
 
