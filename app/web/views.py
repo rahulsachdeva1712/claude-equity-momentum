@@ -541,31 +541,66 @@ def performance_summary(conn: sqlite3.Connection, prefix: str = "paper") -> list
             return "inf" if n > 0 else "-inf"
         return f"{n:.{d}f}"
 
+    def signed(n: float) -> str:
+        """Tone for a value whose sign carries P&L meaning. Zero is neutral
+        so a quiet "no trades closed" row doesn't flash green."""
+        if n != n:
+            return ""
+        if n > 0:
+            return "pos"
+        if n < 0:
+            return "neg"
+        return ""
+
+    def good_when_positive(n: float) -> str:
+        """For metrics that are bounded non-negative but sentiment-positive
+        when > 0 (Win %, avg winning, best trade in a fully-winning book)."""
+        if n != n or n <= 0:
+            return ""
+        return "pos"
+
+    def bad_when_positive(n: float) -> str:
+        """For metrics that are bounded non-negative but sentiment-negative
+        when > 0 (Loss %, Max Drawdown, |avg losing|)."""
+        if n != n or n <= 0:
+            return ""
+        return "neg"
+
+    def ratio_tone(n: float, is_inf: bool) -> str:
+        """Return / MaxDD and Reward / Risk: positive ratio = good, negative
+        = bad, inf = pos (only happens when MaxDD is zero and overall_profit
+        > 0, which is the best possible state)."""
+        if is_inf:
+            return "pos"
+        return signed(n)
+
     col1 = [
-        {"metric": "Overall Paper Profit", "value": inr(s["overall_profit"])},
-        {"metric": "Closed Trades", "value": str(s["closed_trades"])},
-        {"metric": "Average P&L Per Closed Trade", "value": inr(s["avg_pnl_per_closed"])},
-        {"metric": "Win %", "value": pct(s["win_rate"])},
-        {"metric": "Loss %", "value": pct(s["loss_rate"])},
-        {"metric": "Average Profit on Winning Trades", "value": inr(s["avg_profit_winning"])},
+        {"metric": "Overall Paper Profit", "value": inr(s["overall_profit"]), "tone": signed(s["overall_profit"])},
+        {"metric": "Closed Trades", "value": str(s["closed_trades"]), "tone": ""},
+        {"metric": "Average P&L Per Closed Trade", "value": inr(s["avg_pnl_per_closed"]), "tone": signed(s["avg_pnl_per_closed"])},
+        {"metric": "Win %", "value": pct(s["win_rate"]), "tone": good_when_positive(s["win_rate"])},
+        {"metric": "Loss %", "value": pct(s["loss_rate"]), "tone": bad_when_positive(s["loss_rate"])},
+        {"metric": "Average Profit on Winning Trades", "value": inr(s["avg_profit_winning"]), "tone": good_when_positive(s["avg_profit_winning"])},
     ]
     col2 = [
-        {"metric": "Average Loss on Losing Trades", "value": inr(s["avg_loss_losing"])},
-        {"metric": "Best Trade", "value": inr(s["best_trade"])},
-        {"metric": "Worst Trade", "value": inr(s["worst_trade"])},
-        {"metric": "Max Drawdown", "value": inr(s["max_drawdown"])},
-        {"metric": "Duration of Max Drawdown", "value": str(s["max_drawdown_duration_days"])},
-        {"metric": "Open Positions Right Now", "value": str(s["open_positions"])},
+        {"metric": "Average Loss on Losing Trades", "value": inr(s["avg_loss_losing"]), "tone": signed(s["avg_loss_losing"])},
+        {"metric": "Best Trade", "value": inr(s["best_trade"]), "tone": signed(s["best_trade"])},
+        {"metric": "Worst Trade", "value": inr(s["worst_trade"]), "tone": signed(s["worst_trade"])},
+        # max_drawdown is stored as a positive number representing magnitude
+        # of loss, so "drawdown > 0" means "we drew down" → red.
+        {"metric": "Max Drawdown", "value": inr(s["max_drawdown"]), "tone": bad_when_positive(s["max_drawdown"])},
+        {"metric": "Duration of Max Drawdown", "value": str(s["max_drawdown_duration_days"]), "tone": ""},
+        {"metric": "Open Positions Right Now", "value": str(s["open_positions"]), "tone": ""},
     ]
     return_over_maxdd_str = "inf" if s.get("return_over_maxdd_is_inf") else num(s["return_over_maxdd"])
     reward_to_risk_str = "inf" if s.get("reward_to_risk_is_inf") else num(s["reward_to_risk"])
     col3 = [
-        {"metric": "Return / MaxDD", "value": return_over_maxdd_str},
-        {"metric": "Reward to Risk Ratio", "value": reward_to_risk_str},
-        {"metric": "Expectancy / Closed Trade", "value": inr(s["expectancy"])},
-        {"metric": "Max Win Streak (trades)", "value": str(s["max_win_streak"])},
-        {"metric": "Max Losing Streak (trades)", "value": str(s["max_loss_streak"])},
-        {"metric": "Max Days in Drawdown", "value": str(s["max_drawdown_duration_days"])},
+        {"metric": "Return / MaxDD", "value": return_over_maxdd_str, "tone": ratio_tone(s["return_over_maxdd"], s.get("return_over_maxdd_is_inf", False))},
+        {"metric": "Reward to Risk Ratio", "value": reward_to_risk_str, "tone": ratio_tone(s["reward_to_risk"], s.get("reward_to_risk_is_inf", False))},
+        {"metric": "Expectancy / Closed Trade", "value": inr(s["expectancy"]), "tone": signed(s["expectancy"])},
+        {"metric": "Max Win Streak (trades)", "value": str(s["max_win_streak"]), "tone": good_when_positive(s["max_win_streak"])},
+        {"metric": "Max Losing Streak (trades)", "value": str(s["max_loss_streak"]), "tone": bad_when_positive(s["max_loss_streak"])},
+        {"metric": "Max Days in Drawdown", "value": str(s["max_drawdown_duration_days"]), "tone": bad_when_positive(s["max_drawdown_duration_days"])},
     ]
     return [col1, col2, col3]
 

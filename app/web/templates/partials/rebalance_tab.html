@@ -117,65 +117,7 @@
     </div>
   </div>
 
-  {# ---------- TODAY STATUS ---------- #}
-  <h3 class="section-title">Today Status</h3>
-  <table class="data today-status">
-    <thead>
-      <tr>
-        <th>Index</th><th>Date</th><th>Trade Slot</th><th>Status</th><th>Trade Opened</th>
-        <th>Open Legs</th><th>Investment Rs</th><th>Today's MTM</th><th>Realized Rs</th>
-        <th>Open Unrealized P&amp;L</th><th>Return %</th><th>Exit Type</th><th>Marked At</th>
-      </tr>
-    </thead>
-    <tbody>
-      <tr>
-        <td>{{ today.index }}</td>
-        <td class="mono-sm">{{ today.date }}</td>
-        <td>{{ today.trade_slot }}</td>
-        <td><span class="pill {{ 'pill-open' if today.status=='Open' else 'pill-muted' }}">{{ today.status }}</span></td>
-        <td class="center">{% if today.trade_opened %}<span class="check">✓</span>{% else %}—{% endif %}</td>
-        <td class="num">{{ today.open_legs }}</td>
-        <td class="num">{{ '%.2f'|format(today.investment_rs) }}</td>
-        <td class="num {{ 'pos-cell' if today.today_mtm>=0 else 'neg-cell' }}"><strong>{{ '%.2f'|format(today.today_mtm) }}</strong></td>
-        <td class="num {{ 'pos-cell' if today.realized_rs>=0 else 'neg-cell' }}"><strong>{{ '%.2f'|format(today.realized_rs) }}</strong></td>
-        <td class="num {{ 'pos-cell' if today.open_unrealized_pnl>=0 else 'neg-cell' }}"><strong>{{ '%.2f'|format(today.open_unrealized_pnl) }}</strong></td>
-        <td class="num {{ 'pos-cell' if today.return_pct>=0 else 'neg-cell' }}"><strong>{{ '%.2f'|format(today.return_pct) }}%</strong></td>
-        <td>{{ today.exit_type }}</td>
-        <td class="mono-sm">{{ today.marked_at }}</td>
-      </tr>
-    </tbody>
-  </table>
-
-  {# ---------- CHARTS ---------- #}
-  <div class="charts">
-    <div>
-      <div class="chart-title">Daily {{ page_title }} P&amp;L</div>
-      <div id="chart-daily" class="chart-canvas"></div>
-    </div>
-    <div>
-      <div class="chart-title">Cumulative {{ page_title }} P&amp;L</div>
-      <div id="chart-cum" class="chart-canvas"></div>
-    </div>
-  </div>
-
-  {# ---------- PERFORMANCE SUMMARY ---------- #}
-  <h3 class="section-title">Performance Summary</h3>
-  <div class="perf-grid">
-    {% for col in perf %}
-    <div class="perf-col">
-      <table class="data">
-        <thead><tr><th>Metric</th><th>Value</th></tr></thead>
-        <tbody>
-          {% for row in col %}
-          <tr><td>{{ row.metric }}</td><td class="num">{{ row.value }}</td></tr>
-          {% endfor %}
-        </tbody>
-      </table>
-    </div>
-    {% endfor %}
-  </div>
-
-  {# ---------- CURRENT BOOK ---------- #}
+  {# ---------- CURRENT BOOK (in the slot Today Status used to occupy) ---------- #}
   <h3 class="section-title">Current {{ page_title }} Book</h3>
   <p class="muted" style="margin: 0 0 6px;">This table shows the actual open {{ prefix }} holdings after all recorded {{ prefix }} exits/adds have been applied.</p>
   <table class="data book-table">
@@ -204,6 +146,41 @@
       {% else %}<tr><td colspan="11" class="muted">No open {{ prefix }} positions.</td></tr>{% endfor %}
     </tbody>
   </table>
+
+  {# ---------- CHARTS ---------- #}
+  <div class="charts">
+    <div>
+      <div class="chart-title">Daily {{ page_title }} P&amp;L</div>
+      <div id="chart-daily" class="chart-canvas"></div>
+    </div>
+    <div>
+      <div class="chart-title">Cumulative {{ page_title }} P&amp;L</div>
+      <div id="chart-cum" class="chart-canvas"></div>
+    </div>
+  </div>
+
+  {# ---------- PERFORMANCE SUMMARY ---------- #}
+  <h3 class="section-title">Performance Summary</h3>
+  <div class="perf-grid">
+    {% for col in perf %}
+    <div class="perf-col">
+      <table class="data">
+        <thead><tr><th>Metric</th><th>Value</th></tr></thead>
+        <tbody>
+          {% for row in col %}
+          <tr>
+            <td>{{ row.metric }}</td>
+            <td class="num{% if row.tone %} {{ row.tone }}-cell{% endif %}">
+              {% if row.tone %}<strong>{{ row.value }}</strong>{% else %}{{ row.value }}{% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endfor %}
+  </div>
+
 
   {# ---------- TRADE LOG ---------- #}
   <div class="section-head-row">
@@ -263,42 +240,49 @@
   {% else %}
   <p class="muted">No {{ prefix }} trades yet.</p>
   {% endfor %}
-</section>
 
-<script>
-(function() {
-  const pts = {{ pnl_series|tojson }};
-  const x = pts.map(p => p.session_date);
-  const daily = pts.map(p => p.mtm);
-  const cssVar = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
-  const POS = cssVar('--ok') || '#10b981';
-  const NEG = cssVar('--bad') || '#ef4444';
-  const LINE = cssVar('--chart-line') || '#475569';
-  const GRID = cssVar('--chart-grid') || '#1f2937';
-  const BG = cssVar('--card') || '#0f172a';
-  const TEXT = cssVar('--fg') || '#e5e7eb';
-  const dailyColors = daily.map(v => v >= 0 ? POS : NEG);
-  const layoutCommon = {
-    margin: {t: 8, r: 8, b: 40, l: 48},
-    paper_bgcolor: BG,
-    plot_bgcolor: BG,
-    font: {family: "-apple-system, Segoe UI, Helvetica, Arial, sans-serif", size: 11, color: TEXT},
-    xaxis: {title: {text: "Date"}, tickfont: {size: 10}, gridcolor: GRID, zerolinecolor: GRID},
-    yaxis: {title: {text: "P&L, Rs"}, tickfont: {size: 10}, gridcolor: GRID, zerolinecolor: GRID},
-  };
-  Plotly.newPlot("chart-daily",
-    [{x, y: daily, type: "scatter", mode: "markers+lines", name: "Daily",
-      marker: {color: dailyColors, size: 8}, line: {color: LINE, width: 1}}],
-    Object.assign({}, layoutCommon, {yaxis: Object.assign({}, layoutCommon.yaxis, {title: {text: "P&L, Rs"}})}),
-    {displayModeBar: false, responsive: true});
-  const cum = [];
-  let acc = 0;
-  for (const p of pts) { acc += p.mtm; cum.push(acc); }
-  const cumColors = cum.map(v => v >= 0 ? POS : NEG);
-  Plotly.newPlot("chart-cum",
-    [{x, y: cum, type: "scatter", mode: "markers+lines", name: "Cumulative",
-      marker: {color: cumColors, size: 8}, line: {color: LINE, width: 1}}],
-    Object.assign({}, layoutCommon, {yaxis: Object.assign({}, layoutCommon.yaxis, {title: {text: "Cumulative P&L, Rs"}})}),
-    {displayModeBar: false, responsive: true});
-})();
-</script>
+  {# Plotly init lives INSIDE .tab-body so HTMX's hx-select=".tab-body"
+     keeps it on every 30s swap. Outside the section, the script gets
+     stripped on the first poll and the canvases go blank — the symptom
+     that flagged this. Plotly.newPlot is idempotent on the same div, so
+     re-running it on every swap simply re-renders with fresh data. #}
+  <script>
+  (function() {
+    if (typeof Plotly === 'undefined') return;  // CDN didn't load yet; the next poll will retry
+    const pts = {{ pnl_series|tojson }};
+    if (!pts || !pts.length) return;
+    const x = pts.map(p => p.session_date);
+    const daily = pts.map(p => p.mtm);
+    const cssVar = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+    const POS = cssVar('--ok') || '#10b981';
+    const NEG = cssVar('--bad') || '#ef4444';
+    const LINE = cssVar('--chart-line') || '#475569';
+    const GRID = cssVar('--chart-grid') || '#1f2937';
+    const BG = cssVar('--card') || '#0f172a';
+    const TEXT = cssVar('--fg') || '#e5e7eb';
+    const dailyColors = daily.map(v => v >= 0 ? POS : NEG);
+    const layoutCommon = {
+      margin: {t: 8, r: 8, b: 40, l: 48},
+      paper_bgcolor: BG,
+      plot_bgcolor: BG,
+      font: {family: "-apple-system, Segoe UI, Helvetica, Arial, sans-serif", size: 11, color: TEXT},
+      xaxis: {title: {text: "Date"}, tickfont: {size: 10}, gridcolor: GRID, zerolinecolor: GRID},
+      yaxis: {title: {text: "P&L, Rs"}, tickfont: {size: 10}, gridcolor: GRID, zerolinecolor: GRID},
+    };
+    Plotly.newPlot("chart-daily",
+      [{x, y: daily, type: "scatter", mode: "markers+lines", name: "Daily",
+        marker: {color: dailyColors, size: 8}, line: {color: LINE, width: 1}}],
+      Object.assign({}, layoutCommon, {yaxis: Object.assign({}, layoutCommon.yaxis, {title: {text: "P&L, Rs"}})}),
+      {displayModeBar: false, responsive: true});
+    const cum = [];
+    let acc = 0;
+    for (const p of pts) { acc += p.mtm; cum.push(acc); }
+    const cumColors = cum.map(v => v >= 0 ? POS : NEG);
+    Plotly.newPlot("chart-cum",
+      [{x, y: cum, type: "scatter", mode: "markers+lines", name: "Cumulative",
+        marker: {color: cumColors, size: 8}, line: {color: LINE, width: 1}}],
+      Object.assign({}, layoutCommon, {yaxis: Object.assign({}, layoutCommon.yaxis, {title: {text: "Cumulative P&L, Rs"}})}),
+      {displayModeBar: false, responsive: true});
+  })();
+  </script>
+</section>
