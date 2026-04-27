@@ -110,8 +110,9 @@ After eligibility is established — **including the 09:25–09:30 volume gate**
 - Selected names are weighted under the configured `weight_scheme`. The current baseline is `inv_atr`: each target weight is proportional to `1 / atr_pct`, so lower-volatility leaders carry larger allocations. `atr_pct` is floored at `0.001` before inversion to prevent a zero-ATR name from dominating.
 - Alternative schemes are retained in code for experimentation: `rel` (proportional to `relative_return_252d`, the legacy pre-Champion-B behavior), `rel_rank` (proportional to `relative_return_63d`), and `equal` (`1/N`).
 - For `rel` and `rel_rank`, negative contributors are clipped to zero before normalization. If the clipped sum is non-positive, all selected names receive equal weight.
-- Target values are converted into integer shares by `floor(target_value / execution_price)`.
-- Trading cost is deducted at 10 bps of traded value, so final shares are cash-aware.
+- Target values are computed as `weight × portfolio_value`, where `portfolio_value` is the **current** PV at sizing time — `cash + Σ(qty × marked_price)` for the open paper book — not a hardcoded seed. Live trading sizes off the same PV computation; Dhan independently enforces cash on the order side. Sizing off PV (rather than a fixed notional) means a winning portfolio scales up rebalance-over-rebalance and an underwater one scales down, instead of every rebalance pretending it has a fresh ₹1L. (`app/worker/jobs.py::_capital_for` → `app/paper/engine.py::paper_portfolio_value`.)
+- Marked price for the PV computation uses the same fallback chain as `web.views.book_rich`: `live_ltp` → last BUY fill price → `avg_cost`. Fresh entries contribute notional == cost basis (so PV == seed minus charges right after a fill); intraday and overnight refreshes pull from `live_ltp` as the worker polls.
+- Target values are converted into integer shares by `floor(target_value × (1 - txn_cost_bps/10000) / execution_price)`. Trading cost is the explicit 10 bps haircut.
 
 ## A.8 Exit Criteria
 The code does not use a separate stop-loss or profit-target exit model. Exits happen through rebalance logic. A position is reduced or closed when any of the following applies on the next rebalance event:
@@ -245,6 +246,10 @@ Historical OHLCV is **not** persisted. Each 09:30 run fetches the required daily
 
 **Fill rule.** Every paper order fills at the **close of the 09:30 minute candle** for the corresponding symbol. If Dhan returns no 09:30 candle for a symbol (halt, no trade), that symbol is skipped for that session and an alert is raised — matching the strategy's "no tradable bar" rule in A.9. Note that a symbol cleared the 09:25–09:30 volume gate in A.5 before ever producing a paper order, so a missing 09:30 candle at fill time is the only "no tradable bar" case remaining.
 
+**security_id resolution.** EXIT and TRIM orders generated for held-but-dropped names (a position whose symbol no longer appears in today's signals row) need a `security_id` to fetch the 09:30 candle and to place a live SELL. `app/worker/jobs.py::_resolve_security` walks a fall-back chain — today's signals → most recent prior signals row for that symbol → `universe.csv` — so the executor can always price a SELL it knows it wants to make. Without this fall-back, EXITs silently SKIP with note `no_0930_candle`, the BUYs in the same session deploy on top of the held positions, and the book over-leverages (the 2026-04-26 trigger).
+
+**Execution order and cash gate.** `paper_engine.execute_orders` orders rows so EXIT and TRIM rows fire ahead of BUY rows in the same session (`ORDER BY CASE action WHEN 'EXIT' THEN 0 WHEN 'TRIM' THEN 1 ELSE 2 END`). After the SELL leg runs, each BUY checks `paper_cash(conn)` (seed − net deployed − charges, recomputed from `paper_fills`); if `qty × price + estimated charges` exceeds available cash, qty is scaled down to what fits, or the order is SKIPPED with note `insufficient_cash` and a warn alert when even one share doesn't fit. Combined with the PV-based sizing in A.7, this guarantees the paper book never exceeds the seed plus realised gains — leverage is structurally impossible.
+
 **Charges.** Paper fills apply the full Dhan charge stack for CNC delivery:
 - Brokerage (Dhan's publicly posted CNC rate — currently zero for delivery, but computed via a pluggable function so a future change does not require a code change).
 - STT / CTT.
@@ -257,11 +262,13 @@ Breakdown persisted per `paper_fills` row so UI can show "Non broker charge" ide
 
 **Non-broker charges are excluded from headline P&L.** Realized, unrealized, and MTM in `paper_pnl_daily` — and in the per-SELL cells of the Trade Log — are computed **gross** of non-broker charges (STT, exchange txn, SEBI, stamp, GST). Non-broker charges are surfaced as a per-day footer total at the bottom of the Trade Log so the user can still see the drag on net returns, but the strategy-performance headline numbers track pure price gain/loss. Rationale: regulatory charges are price-invariant and drown the v1 paper replay's noise in tiny tiles; the strategy-level question is whether price selection works, not whether statutory fees eat the P&L.
 
+**Realized P&L is cost-basis, not SELL-notional.** `paper_pnl_daily.realized` and the headline Cumulative tile both use `paper.engine._cost_basis_realized_per_session`, which replays the full `paper_fills` history through a running average-cost book and emits per-session realized = `Σ(sell_price - avg_cost_at_time) × qty`. The same average-cost method used by `_apply_to_book` on the live `paper_book` and by `web.views.day_grouped_trade_log` for the per-SELL cells, so the three never disagree. (The previous v1 implementation summed SELL notional which read 0 on a buy-only day but would have read ~99k on a full rotation — wrong by the cost basis.)
+
 **Parity with live.** When live trading is enabled and a live fill lands at quantity `q_live` (possibly a partial fill less than ordered), the paper fill for the same symbol for that session is **adjusted to `q_live`** before MTM is computed. If live is disabled, paper fills at the intended target quantity. This is the "paper follows live quantity" rule.
 
 **Corporate actions.** No adjustments applied to the paper book. If a position exists on record date, the paper quantity stays as-is through the event. Live side is already reconciled from the Dhan positions book so it reflects whatever Dhan applies. This intentionally lets the two drift when a corporate action happens — documented limitation, not a bug.
 
-**MTM.** Paper unrealized PnL uses Dhan LTP for each paper holding, pulled at the same cadence as live reconciliation (15 seconds during market hours). Outside market hours, MTM uses last available close.
+**MTM refresh.** `compute_daily_pnl` writes today's `paper_pnl_daily` row at the 09:30 execution job and is then re-run **every minute Mon-Fri** by `paper_mtm_refresh_job` (B.5). The refresh path passes no fetcher; the engine builds its own from the chain `live_ltp → last BUY fill price → None`. `live_ltp` is populated minute-by-minute during market hours by `ltp_poll_job`; outside market hours the most recent polled value persists, so today's KPI tiles and the Trade Log portfolio value stay close to the open book overnight and across weekends. (Pre-refresh, the row was frozen at the morning fill snapshot — buy-only days read `today_unrealized = 0` for hours and the trade log's portfolio value stuck at the seed.)
 
 **Outputs.** `paper_orders`, `paper_fills`, `paper_book`, `paper_pnl_daily`, `charges`, `alerts`.
 
@@ -322,6 +329,15 @@ The `correlationId` prefix `emrb:` is the app's ownership marker. Reconciliation
   - Live-enabled toggle (kill switch).
   - Worker start / stop buttons.
   - Alerts inbox (unread count badge on the icon).
+
+**Headline KPI tiles (paper tab, in order).**
+1. **Portfolio Value** — `cash + Σ(qty × marked_price)` from `paper_portfolio_value(conn)`. The single number that says "how big is the book right now". Neutral colour, not a delta. Paper-only; live tab omits this tile because live PV would have to come off `live_positions_snapshot`, which is a different code path.
+2. **Today's Change** — today's MTM (realized + unrealized for the current session date), green/red.
+3. **Today Realized** — today's cost-basis realized P&L. Reads `paper_pnl_daily.realized` for the current session date, written by `_cost_basis_realized_per_session` so it agrees with the per-SELL cells of the Trade Log.
+4. **Unrealized P&L** — open-position MTM right now.
+5. **Cumulative P&L** — `Σ(realized) + today's_unrealized` across the entire history, using the same shared `_cost_basis_realized_per_session` helper.
+
+A second row of six tiles (Open Positions / Closed Trades / Win Rate / Avg P&L per Closed / Profit Factor / Max Drawdown) summarises the realized-trade distribution.
 
 **Auto-refresh.** Each tab auto-refreshes every 30 seconds when visible (via HTMX polling). Top-bar status polls every 5 seconds.
 
