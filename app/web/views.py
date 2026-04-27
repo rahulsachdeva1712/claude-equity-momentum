@@ -46,17 +46,24 @@ def _summary(conn: sqlite3.Connection, prefix: str) -> dict:
             if r["side"] == "SELL":
                 realized_total += r["fill_qty"] * r["fill_price"]
 
+    # Realized for today still reads paper_pnl_daily — it only changes when a
+    # new SELL fills, so a once-per-minute refresh is fine. **Unrealized must
+    # be computed live** off the same source the Current Book table uses
+    # (book_rich), otherwise the KPI tile and the per-row Unrealized PnL
+    # diverge between refresh ticks: paper_pnl_daily.unrealized was last
+    # written on the previous minute's `live_ltp` snapshot, while book_rich
+    # reads `live_ltp` fresh on every render.
     latest = conn.execute(
         f"SELECT realized, unrealized, mtm FROM {prefix}_pnl_daily"
         " ORDER BY session_date DESC LIMIT 1"
     ).fetchone()
-    today = {"realized": 0.0, "unrealized": 0.0, "mtm": 0.0}
-    if latest:
-        today = {
-            "realized": float(latest["realized"]),
-            "unrealized": float(latest["unrealized"]),
-            "mtm": float(latest["mtm"]),
-        }
+    today_realized = float(latest["realized"]) if latest else 0.0
+    today_unrealized = sum(float(b["unrealized_pnl"]) for b in book_rich(conn, prefix))
+    today = {
+        "realized": today_realized,
+        "unrealized": today_unrealized,
+        "mtm": today_realized + today_unrealized,
+    }
 
     if prefix == "paper":
         book = conn.execute("SELECT COUNT(*) AS c FROM paper_book").fetchone()["c"]

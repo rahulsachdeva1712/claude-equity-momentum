@@ -177,6 +177,46 @@ def test_pnl_falls_back_to_last_buy_when_live_ltp_empty(db):
     assert out["realized"] == pytest.approx(0.0)
 
 
+def test_summary_unrealized_matches_current_book_total(db):
+    """KPI tile and Current Book table must read the same unrealized number.
+    Before the fix, the tile read paper_pnl_daily.unrealized (a once-a-minute
+    snapshot) while the table computed live from `live_ltp` — so a price
+    move between refresh ticks made them diverge until the next refresh.
+    Now both go through book_rich's live computation."""
+    from app.web.views import paper_summary, book_rich
+
+    d1 = date(2026, 4, 21)
+    _seed_signals(db, d1, [("CDG", 1, 10)])
+    generate_orders(db, d1)
+    execute_orders(db, d1, price_fetcher=lambda s: 100.0)
+
+    # Mark the position up via live_ltp.
+    with tx(db):
+        db.execute(
+            "INSERT INTO live_ltp (symbol, ltp, fetched_at) VALUES (?, ?, ?)",
+            ("CDG", 130.0, "2026-04-21T15:30:00+05:30"),
+        )
+
+    # Write a STALE paper_pnl_daily row simulating an out-of-date refresh
+    # (e.g. live_ltp was 110 when the last `paper_mtm_refresh_job` ran).
+    with tx(db):
+        db.execute(
+            "INSERT INTO paper_pnl_daily (session_date, realized, unrealized, mtm, computed_at)"
+            " VALUES (?, 0.0, 100.0, 100.0, ?)"
+            " ON CONFLICT(session_date) DO UPDATE SET realized=excluded.realized,"
+            " unrealized=excluded.unrealized, mtm=excluded.mtm, computed_at=excluded.computed_at",
+            (d1.isoformat(), "2026-04-21T15:29:00+05:30"),
+        )
+
+    s = paper_summary(db)
+    book_total = sum(b["unrealized_pnl"] for b in book_rich(db, "paper"))
+    # Live truth: 10 * (130 - 100) = 300, NOT the stale 100 in paper_pnl_daily.
+    assert s["today_unrealized"] == pytest.approx(300.0)
+    assert s["today_unrealized"] == pytest.approx(book_total)
+    # today_mtm and cumulative also rebuild off live unrealized.
+    assert s["today_mtm"] == pytest.approx(s["today_realized"] + s["today_unrealized"])
+
+
 def test_summary_includes_portfolio_value_for_paper(db):
     """The headline KPI tile reads ``summary.portfolio_value`` directly
     from ``paper_portfolio_value(conn)``. Pin the wiring so a future
