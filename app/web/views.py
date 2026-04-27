@@ -75,10 +75,13 @@ def _summary(conn: sqlite3.Connection, prefix: str, book: list[dict] | None = No
         "mtm": today_realized + today_unrealized,
     }
 
+    # `book` (the position list) is the in-memory snapshot we rely on for
+    # the live PV tile below — keep it untouched. Use a separate name for
+    # the position count.
     if prefix == "paper":
-        book = conn.execute("SELECT COUNT(*) AS c FROM paper_book").fetchone()["c"]
+        open_count = conn.execute("SELECT COUNT(*) AS c FROM paper_book").fetchone()["c"]
     else:
-        book = (
+        open_count = (
             conn.execute(
                 "SELECT COUNT(DISTINCT symbol) AS c FROM live_positions_snapshot"
                 " WHERE taken_at = (SELECT MAX(taken_at) FROM live_positions_snapshot)"
@@ -92,18 +95,24 @@ def _summary(conn: sqlite3.Connection, prefix: str, book: list[dict] | None = No
         "today_realized": today["realized"],
         "today_unrealized": today["unrealized"],
         "cumulative": realized_total + today["unrealized"],
-        "open_positions": int(book),
+        "open_positions": int(open_count),
         "closed_fills": int(closed),
     }
+    # Headline value tile: how big is the book *right now*.
     if prefix == "paper":
-        # Headline portfolio value tile — cash + Σ(qty × marked_price). The
-        # right number to read at a glance: how big is the book *right now*.
-        # Live equivalent would have to come off live_positions_snapshot
-        # value rather than this paper-only computation, so we only emit it
-        # on the paper side.
+        # Paper side has explicit cash tracking, so we report full PV
+        # (cash + Σ qty × marked_price).
         from app.paper.engine import paper_portfolio_value
 
         out["portfolio_value"] = paper_portfolio_value(conn)
+        out["portfolio_value_label"] = "Portfolio Value"
+    else:
+        # Live side: cash sits in the Dhan account and the web process
+        # can't fetch it (FRD B.2 — only the worker calls Dhan). Report
+        # holdings MTM instead, labelled to make the distinction obvious.
+        # Equals Σ(qty × marked_price) for the latest live snapshot.
+        out["portfolio_value"] = sum(float(b["qty"]) * float(b["marked_price"]) for b in book)
+        out["portfolio_value_label"] = "Holdings Value"
     return out
 
 
@@ -595,8 +604,9 @@ def performance_summary(conn: sqlite3.Connection, prefix: str = "paper") -> list
             return "pos"
         return signed(n)
 
+    label_prefix = "Paper" if prefix == "paper" else "Live"
     col1 = [
-        {"metric": "Overall Paper Profit", "value": inr(s["overall_profit"]), "tone": signed(s["overall_profit"])},
+        {"metric": f"Overall {label_prefix} Profit", "value": inr(s["overall_profit"]), "tone": signed(s["overall_profit"])},
         {"metric": "Closed Trades", "value": str(s["closed_trades"]), "tone": ""},
         {"metric": "Average P&L Per Closed Trade", "value": inr(s["avg_pnl_per_closed"]), "tone": signed(s["avg_pnl_per_closed"])},
         {"metric": "Win %", "value": pct(s["win_rate"]), "tone": good_when_positive(s["win_rate"])},
@@ -849,14 +859,15 @@ def day_grouped_trade_log(conn: sqlite3.Connection, limit_days: int = 30, prefix
         cum += per_day_pnl.get(sd, 0.0)
         running_pnl_to_end_of_day[sd] = cum
 
-    # End-of-day unrealized per session, sourced from paper_pnl_daily (kept
-    # fresh by paper_mtm_refresh_job, FRD B.5/B.6). Including this in the
-    # portfolio-value tile means a portfolio that's bought-and-holding —
-    # zero realized — still shows the open book's mark-to-market gain
-    # instead of sticking at the seed.
+    # End-of-day unrealized per session, sourced from {prefix}_pnl_daily
+    # (paper kept fresh by paper_mtm_refresh_job, FRD B.5/B.6; live
+    # populated by the recon path's compute_live_daily_pnl). Including
+    # this in the portfolio-value column means a buy-and-hold day still
+    # reflects the open book's mark-to-market gain instead of sticking
+    # at the seed.
     unrealized_eod: dict[str, float] = {
         r["session_date"]: float(r["unrealized"])
-        for r in conn.execute("SELECT session_date, unrealized FROM paper_pnl_daily")
+        for r in conn.execute(f"SELECT session_date, unrealized FROM {prefix}_pnl_daily")
     }
 
     # Build collapsible groups in reverse-chronological order (newest first).

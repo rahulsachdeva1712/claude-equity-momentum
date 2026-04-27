@@ -46,7 +46,7 @@
     <div class="kpi-row">
       {% if summary.portfolio_value is defined %}
       <div class="kpi">
-        <div class="kpi-label">Portfolio Value</div>
+        <div class="kpi-label">{{ summary.portfolio_value_label or 'Portfolio Value' }}</div>
         <div class="kpi-value">
           Rs {{ '%.2f'|format(summary.portfolio_value) }}
         </div>

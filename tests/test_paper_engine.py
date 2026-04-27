@@ -262,17 +262,22 @@ def test_summary_includes_portfolio_value_for_paper(db):
 
     s = paper_summary(db)
     assert "portfolio_value" in s
+    assert s["portfolio_value_label"] == "Portfolio Value"
     assert s["portfolio_value"] == pytest.approx(paper_portfolio_value(db))
 
 
-def test_summary_omits_portfolio_value_for_live(db):
-    """Live PV would have to come off the broker snapshot, not paper
-    cash — keep the field paper-only so a `{% if … is defined %}`
-    template guard keeps the live tab clean."""
+def test_summary_emits_holdings_value_for_live(db):
+    """Live tab emits portfolio_value too, but as holdings MTM only
+    (cash sits in the Dhan account and the web process can't fetch it
+    per FRD B.2). The accompanying label switches to "Holdings Value"
+    so the user can tell the two tiles apart."""
     from app.web.views import live_summary
 
     s = live_summary(db)
-    assert "portfolio_value" not in s
+    assert "portfolio_value" in s
+    assert s["portfolio_value_label"] == "Holdings Value"
+    # No live positions => zero.
+    assert s["portfolio_value"] == pytest.approx(0.0)
 
 
 def test_paper_cash_starts_at_seed(db):
