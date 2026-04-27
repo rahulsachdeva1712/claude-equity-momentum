@@ -23,8 +23,16 @@ from app.time_utils import IST
 # --------------------------------------------------------------------------
 
 
-def _summary(conn: sqlite3.Connection, prefix: str) -> dict:
-    """Prefix is 'paper' or 'live'. Returns headline tiles."""
+def _summary(conn: sqlite3.Connection, prefix: str, book: list[dict] | None = None) -> dict:
+    """Prefix is 'paper' or 'live'. Returns headline tiles.
+
+    ``book`` may be passed in by the caller — typically the request handler
+    that *also* hands the same list to the template as the ``book`` context
+    var. Sharing the list avoids a race where two ``book_rich`` calls (one
+    here for the KPI Unrealized tile, one for the Current Book table) read
+    ``live_ltp`` either side of a worker write and end up reporting two
+    different unrealized values for the same render.
+    """
     # Headline "cumulative realized" excludes non-broker charges — those
     # surface as a Trade Log footer total, not in the tile math. Keeps the
     # tile consistent with paper.engine.compute_daily_pnl and the per-day
@@ -58,7 +66,9 @@ def _summary(conn: sqlite3.Connection, prefix: str) -> dict:
         " ORDER BY session_date DESC LIMIT 1"
     ).fetchone()
     today_realized = float(latest["realized"]) if latest else 0.0
-    today_unrealized = sum(float(b["unrealized_pnl"]) for b in book_rich(conn, prefix))
+    if book is None:
+        book = book_rich(conn, prefix)
+    today_unrealized = sum(float(b["unrealized_pnl"]) for b in book)
     today = {
         "realized": today_realized,
         "unrealized": today_unrealized,
@@ -351,13 +361,17 @@ def live_summary_rich(conn: sqlite3.Connection) -> dict:
     return summary_rich(conn, "live")
 
 
-def summary_rich(conn: sqlite3.Connection, prefix: str = "paper") -> dict:
+def summary_rich(conn: sqlite3.Connection, prefix: str = "paper", book: list[dict] | None = None) -> dict:
     """Full KPI set including win-rate, profit factor, drawdown, etc.
 
     Returns a superset of `_summary(prefix)`. Safe to compute on an empty DB.
     Accepts 'paper' or 'live' to drive the same UI off either book.
+
+    ``book`` is the per-request `book_rich` list — see `_summary` for why
+    sharing it across the call avoids a `live_ltp` race between the KPI
+    tile and the Current Book table.
     """
-    base = _summary(conn, prefix)
+    base = _summary(conn, prefix, book=book)
     fills = _chronological_fills(conn, prefix)
     closed = _replay_closed_trades(fills)
 

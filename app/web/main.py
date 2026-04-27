@@ -90,10 +90,14 @@ def create_app() -> FastAPI:
                     "hx_url": f"/{prefix}",
                     "export_url": f"/{prefix}/export/trade-log.csv",
                     "page_title": "Paper Trading" if prefix == "paper" else "Live Trading",
-                    "summary": views.summary_rich(conn, prefix),
+                    # Compute book_rich once and reuse for both summary_rich
+                    # (KPI Unrealized tile) and the `book` template var. Two
+                    # separate calls would re-read live_ltp and could land on
+                    # different snapshots if the worker wrote between them.
+                    "summary": None,  # filled below
                     "signals": views.signals_for(conn, sess),
                     "signals_brief": views.signals_today_brief(conn, sess),
-                    "book": views.book_rich(conn, prefix),
+                    "book": None,  # filled below
                     "pnl_series": views.pnl_timeseries(conn, prefix),
                     "fills": views.recent_fills(conn, prefix),
                     "meta": views.book_meta(conn, sess, prefix),
@@ -104,6 +108,9 @@ def create_app() -> FastAPI:
                     "execution_done": views.execution_done_today(conn, sess),
                 }
             )
+            book = views.book_rich(conn, prefix)
+            ctx["book"] = book
+            ctx["summary"] = views.summary_rich(conn, prefix, book=book)
             return ctx
         finally:
             conn.close()

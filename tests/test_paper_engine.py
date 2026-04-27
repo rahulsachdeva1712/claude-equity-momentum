@@ -177,6 +177,43 @@ def test_pnl_falls_back_to_last_buy_when_live_ltp_empty(db):
     assert out["realized"] == pytest.approx(0.0)
 
 
+def test_summary_uses_provided_book_avoiding_live_ltp_race(db):
+    """If the caller passes ``book``, the KPI tile reuses it instead of
+    re-reading ``live_ltp`` — preventing a divergence when the worker
+    writes ``live_ltp`` between the two reads in a single render."""
+    from app.web.views import summary_rich, book_rich
+
+    d1 = date(2026, 4, 21)
+    _seed_signals(db, d1, [("CDG", 1, 10)])
+    generate_orders(db, d1)
+    execute_orders(db, d1, price_fetcher=lambda s: 100.0)
+
+    with tx(db):
+        db.execute(
+            "INSERT INTO live_ltp (symbol, ltp, fetched_at) VALUES (?, ?, ?)",
+            ("CDG", 130.0, "2026-04-21T15:30:00+05:30"),
+        )
+
+    # Snapshot the book at one instant. Then mutate live_ltp to simulate the
+    # worker writing between the request handler's two reads.
+    book_snapshot = book_rich(db, "paper")
+    snapshot_unrealized = sum(b["unrealized_pnl"] for b in book_snapshot)
+    assert snapshot_unrealized == pytest.approx(300.0)
+
+    with tx(db):
+        db.execute(
+            "UPDATE live_ltp SET ltp = ?, fetched_at = ? WHERE symbol = 'CDG'",
+            (90.0, "2026-04-21T15:31:00+05:30"),
+        )
+
+    # When summary_rich is given the snapshot, the KPI tile uses the
+    # snapshot's number — matching whatever the template will render for
+    # the Current Book table from the same snapshot.
+    s = summary_rich(db, "paper", book=book_snapshot)
+    assert s["today_unrealized"] == pytest.approx(snapshot_unrealized)
+    assert s["today_unrealized"] == pytest.approx(300.0)
+
+
 def test_summary_unrealized_matches_current_book_total(db):
     """KPI tile and Current Book table must read the same unrealized number.
     Before the fix, the tile read paper_pnl_daily.unrealized (a once-a-minute
