@@ -716,13 +716,21 @@ def day_grouped_trade_log(conn: sqlite3.Connection, limit_days: int = 30, prefix
     # those surface in a per-day footer total so the headline cell tracks
     # pure price gain/loss.
     closed_by_fill_id: dict[int, dict] = {}
+    # Per-fill kind labels — replayed from the running cost-basis book so the
+    # Trade Log can call a SELL "Full Exit" only when it actually closes the
+    # position, and a BUY "Top-up" when it adds to an existing leg. The old
+    # version hardcoded every SELL as "Partial Exit" and every BUY as
+    # "New Entry", which read as a bug the moment a full rotation hit.
+    kind_by_fill_id: dict[int, str] = {}
     running: dict[str, dict] = {}
     for f in fills:
         sym = f["symbol"]
         st = running.setdefault(sym, {"qty": 0, "cost_basis": 0.0})
         if f["side"] == "BUY":
+            had_position = st["qty"] > 0
             st["qty"] += int(f["fill_qty"])
             st["cost_basis"] += float(f["fill_qty"]) * float(f["fill_price"])
+            kind_by_fill_id[int(f["id"])] = "Top-up" if had_position else "New Entry"
         else:
             qty = int(f["fill_qty"])
             if st["qty"] <= 0:
@@ -735,6 +743,9 @@ def day_grouped_trade_log(conn: sqlite3.Connection, limit_days: int = 30, prefix
             st["qty"] -= qty
             if st["qty"] == 0:
                 st["cost_basis"] = 0.0
+                kind_by_fill_id[int(f["id"])] = "Full Exit"
+            else:
+                kind_by_fill_id[int(f["id"])] = "Partial Exit"
 
     # Running cumulative P&L (for portfolio value per day).
     opening_capital = 100_000.0  # display default; reference screenshot uses 1L seed
@@ -761,7 +772,7 @@ def day_grouped_trade_log(conn: sqlite3.Connection, limit_days: int = 30, prefix
             "symbol": f["symbol"],
             "side": f["side"],
             "badge": "Rebalance",
-            "kind": "Partial Exit" if f["side"] == "SELL" else "New Entry",
+            "kind": kind_by_fill_id.get(int(f["id"]), "Partial Exit" if f["side"] == "SELL" else "New Entry"),
             "entry_at": _fmt_date_short(entry_at) if entry_at and f["side"] == "BUY" else "—",
             "exit_at": _fmt_date_short(entry_at) if entry_at and f["side"] == "SELL" else "—",
             "fill_price": float(f["fill_price"]),

@@ -43,11 +43,24 @@ def _seed_buy(conn, sd: str, symbol: str, qty: int, price: float):
                 f"{sd}T09:30:00+05:30",
             ),
         )
-        conn.execute(
-            "INSERT INTO paper_book (symbol, qty, avg_cost, cost_basis, updated_at)"
-            " VALUES (?, ?, ?, ?, ?)",
-            (symbol, qty, price, qty * price, f"{sd}T09:30:00+05:30"),
-        )
+        # UPSERT so a top-up call on the same symbol just adds qty, mirroring
+        # what _apply_to_book does in production.
+        existing = conn.execute(
+            "SELECT qty, cost_basis FROM paper_book WHERE symbol = ?", (symbol,)
+        ).fetchone()
+        if existing:
+            new_qty = int(existing["qty"]) + qty
+            new_cb = float(existing["cost_basis"]) + qty * price
+            conn.execute(
+                "UPDATE paper_book SET qty=?, avg_cost=?, cost_basis=?, updated_at=? WHERE symbol=?",
+                (new_qty, new_cb / new_qty, new_cb, f"{sd}T09:30:00+05:30", symbol),
+            )
+        else:
+            conn.execute(
+                "INSERT INTO paper_book (symbol, qty, avg_cost, cost_basis, updated_at)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (symbol, qty, price, qty * price, f"{sd}T09:30:00+05:30"),
+            )
 
 
 def _seed_pnl_daily(conn, sd: str, realized: float, unrealized: float):
@@ -83,6 +96,61 @@ def test_portfolio_value_zero_unrealized_when_pnl_row_missing(db):
     groups = day_grouped_trade_log(db)
     g = groups[0]
     assert g["portfolio_value"] == pytest.approx(100_000.0)
+
+
+def test_kind_label_distinguishes_full_vs_partial_exit_and_top_up(db):
+    """`kind` was hardcoded to "Partial Exit" for every SELL and
+    "New Entry" for every BUY. The replay now sets it from the running
+    cost-basis book: SELL closing to zero → "Full Exit"; SELL leaving a
+    residual → "Partial Exit"; BUY with no prior position → "New Entry";
+    BUY adding to an existing position → "Top-up"."""
+    # Day 1: open A.
+    _seed_buy(db, "2026-04-21", "A", 100, 50.0)
+    # Day 2: top up A.
+    _seed_buy(db, "2026-04-22", "A", 50, 60.0)
+    # Day 3: trim A from 150 down to 100.
+    with tx(db):
+        # Manually record the partial SELL at 70.
+        db.execute(
+            "INSERT INTO paper_orders (session_date, symbol, action, order_qty, status, created_at)"
+            " VALUES (?, 'A', 'TRIM', 50, 'FILLED', ?)",
+            ("2026-04-23", "2026-04-23T09:30:00+05:30"),
+        )
+        oid = db.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+        db.execute(
+            "INSERT INTO paper_fills"
+            " (paper_order_id, session_date, symbol, side, fill_qty, fill_price,"
+            "  charges_total, charges_json, filled_at)"
+            " VALUES (?, '2026-04-23', 'A', 'SELL', 50, 70.0, 0.0, '{}',"
+            " '2026-04-23T09:30:00+05:30')",
+            (oid,),
+        )
+        # Day 4: full exit at 80.
+        db.execute(
+            "INSERT INTO paper_orders (session_date, symbol, action, order_qty, status, created_at)"
+            " VALUES (?, 'A', 'EXIT', 100, 'FILLED', ?)",
+            ("2026-04-24", "2026-04-24T09:30:00+05:30"),
+        )
+        oid = db.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+        db.execute(
+            "INSERT INTO paper_fills"
+            " (paper_order_id, session_date, symbol, side, fill_qty, fill_price,"
+            "  charges_total, charges_json, filled_at)"
+            " VALUES (?, '2026-04-24', 'A', 'SELL', 100, 80.0, 0.0, '{}',"
+            " '2026-04-24T09:30:00+05:30')",
+            (oid,),
+        )
+
+    groups = day_grouped_trade_log(db)
+    rows_by_date_side = {
+        (g["session_date"], r["side"]): r["kind"]
+        for g in groups
+        for r in g["rows"]
+    }
+    assert rows_by_date_side[("2026-04-21", "BUY")] == "New Entry"
+    assert rows_by_date_side[("2026-04-22", "BUY")] == "Top-up"
+    assert rows_by_date_side[("2026-04-23", "SELL")] == "Partial Exit"
+    assert rows_by_date_side[("2026-04-24", "SELL")] == "Full Exit"
 
 
 def test_portfolio_value_compounds_realized_and_unrealized(db):

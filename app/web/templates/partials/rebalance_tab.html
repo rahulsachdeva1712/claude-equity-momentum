@@ -233,7 +233,7 @@
             <span class="sym mono"><strong>{{ r.symbol }}</strong></span><br>
             <span class="badge badge-rebalance">{{ r.badge }}</span>
             <span class="badge badge-side {{ 'badge-buy' if r.side=='BUY' else 'badge-sell' }}">{{ 'B' if r.side=='BUY' else 'S' }}</span>
-            <span class="badge badge-kind {{ 'badge-new' if r.kind=='New Entry' else 'badge-exit' }}">{{ r.kind }}</span>
+            <span class="badge badge-kind {{ 'badge-new' if r.side=='BUY' else 'badge-exit' }}">{{ r.kind }}</span>
           </td>
           <td class="mono-sm">{{ r.entry_at }}</td>
           <td class="mono-sm">{{ r.exit_at }}</td>
