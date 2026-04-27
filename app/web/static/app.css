@@ -231,8 +231,13 @@ table.data td { font-size: 13px; color: var(--fg); }
 table.data tr:last-child td { border-bottom: none; }
 table.data.compact th, table.data.compact td { padding: 5px 10px; font-size: 12px; }
 
-.pos-cell { color: var(--ok); background: var(--pos-bg); }
-.neg-cell { color: var(--bad); background: var(--neg-bg); }
+/* `table.data td { color: var(--fg); }` above has specificity (0,1,2) and
+   would otherwise override `.pos-cell { color: ... }` (0,1,0) — so text
+   stayed grey inside any data table even when the cell carried the class.
+   These bumped selectors restore the green/red tint inside data tables
+   (and `<strong>` inherits via the td). */
+.pos-cell, table.data td.pos-cell { color: var(--ok); background: var(--pos-bg); }
+.neg-cell, table.data td.neg-cell { color: var(--bad); background: var(--neg-bg); }
 
 /* ------------ today status row ------------ */
 .today-status th, .today-status td { white-space: nowrap; }
