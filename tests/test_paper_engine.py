@@ -177,6 +177,27 @@ def test_pnl_falls_back_to_last_buy_when_live_ltp_empty(db):
     assert out["realized"] == pytest.approx(0.0)
 
 
+def test_summary_includes_portfolio_value_for_paper(db):
+    """The headline KPI tile reads ``summary.portfolio_value`` directly
+    from ``paper_portfolio_value(conn)``. Pin the wiring so a future
+    refactor of either function keeps them in sync."""
+    from app.web.views import paper_summary
+
+    s = paper_summary(db)
+    assert "portfolio_value" in s
+    assert s["portfolio_value"] == pytest.approx(paper_portfolio_value(db))
+
+
+def test_summary_omits_portfolio_value_for_live(db):
+    """Live PV would have to come off the broker snapshot, not paper
+    cash — keep the field paper-only so a `{% if … is defined %}`
+    template guard keeps the live tab clean."""
+    from app.web.views import live_summary
+
+    s = live_summary(db)
+    assert "portfolio_value" not in s
+
+
 def test_paper_cash_starts_at_seed(db):
     """A fresh book has no fills, so cash equals the ₹1L seed exactly."""
     assert paper_cash(db) == pytest.approx(100_000.0)

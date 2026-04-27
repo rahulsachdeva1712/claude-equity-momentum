@@ -70,7 +70,7 @@ def _summary(conn: sqlite3.Connection, prefix: str) -> dict:
         )
 
     closed = conn.execute(f"SELECT COUNT(*) AS c FROM {prefix}_fills").fetchone()["c"]
-    return {
+    out = {
         "today_mtm": today["mtm"],
         "today_realized": today["realized"],
         "today_unrealized": today["unrealized"],
@@ -78,6 +78,16 @@ def _summary(conn: sqlite3.Connection, prefix: str) -> dict:
         "open_positions": int(book),
         "closed_fills": int(closed),
     }
+    if prefix == "paper":
+        # Headline portfolio value tile — cash + Σ(qty × marked_price). The
+        # right number to read at a glance: how big is the book *right now*.
+        # Live equivalent would have to come off live_positions_snapshot
+        # value rather than this paper-only computation, so we only emit it
+        # on the paper side.
+        from app.paper.engine import paper_portfolio_value
+
+        out["portfolio_value"] = paper_portfolio_value(conn)
+    return out
 
 
 def paper_summary(conn: sqlite3.Connection) -> dict:
