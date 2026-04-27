@@ -28,28 +28,5 @@
       {% endif %}
     </form>
 
-    <details class="alerts-dropdown">
-      <summary class="pill {% if bar.unacked_alerts %}bad{% endif %}">
-        alerts{% if bar.unacked_alerts %} ({{ bar.unacked_alerts }}){% endif %}
-      </summary>
-      <div class="alerts-pop">
-        {% if alerts %}
-          <ul class="alerts">
-            {% for a in alerts %}
-              <li class="alert alert-{{ a.severity }}">
-                <span class="sev">{{ a.severity }}</span>
-                <span class="src">{{ a.source }}</span>
-                <span class="msg">{{ a.message }}</span>
-                <form method="post" action="/alerts/{{ a.id }}/ack" class="inline-form">
-                  <button class="btn-small" type="submit">ack</button>
-                </form>
-              </li>
-            {% endfor %}
-          </ul>
-        {% else %}
-          <p class="muted" style="margin:0">No alerts.</p>
-        {% endif %}
-      </div>
-    </details>
   </div>
 </header>

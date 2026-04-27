@@ -29,13 +29,22 @@ def _summary(conn: sqlite3.Connection, prefix: str) -> dict:
     # surface as a Trade Log footer total, not in the tile math. Keeps the
     # tile consistent with paper.engine.compute_daily_pnl and the per-day
     # Trade Log replay below.
-    fills = conn.execute(
-        f"SELECT side, fill_qty, fill_price FROM {prefix}_fills"
-    ).fetchall()
-    realized_total = 0.0
-    for r in fills:
-        if r["side"] == "SELL":
-            realized_total += r["fill_qty"] * r["fill_price"]
+    if prefix == "paper":
+        from app.paper.engine import _cost_basis_realized_per_session
+
+        per_day = _cost_basis_realized_per_session(conn)
+        realized_total = float(sum(per_day.values()))
+    else:
+        # Live keeps the SELL-notional approximation for now — live
+        # realized comes from the Dhan reconciliation path which uses
+        # snapshot deltas, not paper-style avg-cost replay.
+        fills = conn.execute(
+            f"SELECT side, fill_qty, fill_price FROM {prefix}_fills"
+        ).fetchall()
+        realized_total = 0.0
+        for r in fills:
+            if r["side"] == "SELL":
+                realized_total += r["fill_qty"] * r["fill_price"]
 
     latest = conn.execute(
         f"SELECT realized, unrealized, mtm FROM {prefix}_pnl_daily"
@@ -763,11 +772,25 @@ def day_grouped_trade_log(conn: sqlite3.Connection, limit_days: int = 30, prefix
         cum += per_day_pnl.get(sd, 0.0)
         running_pnl_to_end_of_day[sd] = cum
 
+    # End-of-day unrealized per session, sourced from paper_pnl_daily (kept
+    # fresh by paper_mtm_refresh_job, FRD B.5/B.6). Including this in the
+    # portfolio-value tile means a portfolio that's bought-and-holding —
+    # zero realized — still shows the open book's mark-to-market gain
+    # instead of sticking at the seed.
+    unrealized_eod: dict[str, float] = {
+        r["session_date"]: float(r["unrealized"])
+        for r in conn.execute("SELECT session_date, unrealized FROM paper_pnl_daily")
+    }
+
     # Build collapsible groups in reverse-chronological order (newest first).
     groups = []
     for sd in reversed(days_order[-limit_days:]):
         label_dt = datetime.fromisoformat(sd).replace(tzinfo=IST)
-        pv = opening_capital + running_pnl_to_end_of_day[sd]
+        pv = (
+            opening_capital
+            + running_pnl_to_end_of_day[sd]
+            + unrealized_eod.get(sd, 0.0)
+        )
         nb_total = per_day_non_broker.get(sd, 0.0)
         groups.append(
             {

@@ -252,6 +252,34 @@ async def ltp_poll_job(dhan: DhanClient) -> None:
         log.debug("ltp poll: updated=%d skipped=%d", len(updates), skipped)
 
 
+async def paper_mtm_refresh_job() -> None:
+    """Refresh today's ``paper_pnl_daily`` row using the latest ``live_ltp``.
+
+    The 09:30 ``execution_job`` writes the row once with that morning's
+    fill prices, which makes ``unrealized`` start at zero. Without this
+    refresh the headline KPI tiles and the Trade Log portfolio value
+    would stay frozen at "fill day" until the *next* rebalance overwrote
+    them — including across nights and weekends. The job re-runs
+    ``compute_daily_pnl`` for the current session date with no explicit
+    fetcher, so the engine falls back to the chain
+    ``live_ltp → last BUY fill price → None`` (FRD B.6). Realized stays
+    deterministic because it's reconstructed from the `paper_fills`
+    rows, not accumulated.
+
+    Cheap and idempotent — one row per session, written by ``UPSERT``.
+    """
+    conn = connect()
+    try:
+        sess = session_date_for(now_ist())
+        from app.paper.engine import compute_daily_pnl as _compute_paper_pnl
+
+        _compute_paper_pnl(conn, sess)
+    except Exception as e:  # noqa: BLE001 — never crash the scheduler
+        log.warning("paper_mtm_refresh_job failed: %s", e)
+    finally:
+        conn.close()
+
+
 COMMAND_RUN_REBALANCE = "run_rebalance.now"
 # Sentinel files older than this are treated as stale — likely the worker
 # was down when the user clicked, and the intent is no longer current.
@@ -544,17 +572,22 @@ async def execution_job(
                 indent=2,
             )
 
-        # Step 6: fill paper + place live orders.
+        # Step 6: fill paper + place live orders. Resolve security_id with
+        # the same fall-back chain as _fetch_0930_closes so EXIT/TRIM
+        # orders for held-but-dropped names (no row in today's signals)
+        # still place on the live side instead of being silently filtered
+        # out by the `if t[4]` guard below.
         paper_rows = conn.execute(
-            "SELECT po.id, po.symbol, po.action, po.order_qty, s.security_id, s.exchange_segment"
-            " FROM paper_orders po LEFT JOIN signals s ON s.session_date = po.session_date AND s.symbol = po.symbol"
-            " WHERE po.session_date = ? AND po.status = 'PENDING'",
+            "SELECT id, symbol, action, order_qty FROM paper_orders"
+            " WHERE session_date = ? AND status = 'PENDING'",
             (sess.isoformat(),),
         ).fetchall()
-        tuples = [
-            (int(r["id"]), r["symbol"], r["action"], int(r["order_qty"]), r["security_id"] or "", r["exchange_segment"] or "BSE_EQ")
-            for r in paper_rows
-        ]
+        tuples = []
+        for r in paper_rows:
+            sec, seg = _resolve_security(conn, sess, r["symbol"])
+            tuples.append(
+                (int(r["id"]), r["symbol"], r["action"], int(r["order_qty"]), sec or "", seg or "BSE_EQ")
+            )
 
         overrides: dict[int, int] = {}
         if is_live_enabled(conn):
@@ -650,13 +683,17 @@ def token_expiry_monitor_job(dhan: DhanClient, state: dict) -> None:
 
 
 def _capital_for(conn: sqlite3.Connection) -> float:
-    row = conn.execute("SELECT value FROM settings WHERE key = 'capital'").fetchone()
-    if row:
-        try:
-            return float(row["value"])
-        except (TypeError, ValueError):
-            return 100_000.0
-    return 100_000.0
+    """Capital available for this rebalance = current portfolio value.
+
+    Sizing always tracks PV (cash + open-position MTM) instead of a fixed
+    notional, so rebalances neither over-deploy past the seed (the
+    2026-04-26 leverage bug) nor chronically under-deploy a winning book.
+    Live trading also benefits — Dhan enforces cash, but unconstrained
+    sizing would still leave a winning portfolio under-allocated.
+    """
+    from app.paper.engine import paper_portfolio_value
+
+    return paper_portfolio_value(conn)
 
 
 async def _fetch_0925_0930_volumes(
@@ -698,6 +735,56 @@ async def _fetch_0925_0930_volumes(
     return out
 
 
+def _resolve_security(
+    conn: sqlite3.Connection, sess: date, symbol: str
+) -> tuple[str | None, str | None]:
+    """Find ``(security_id, exchange_segment)`` for a symbol with fall-back.
+
+    Today's signals row is preferred (it's what the strategy just used),
+    but a held-but-dropped name (an EXIT diff target) won't have a row in
+    today's signals. Without a fallback, ``_fetch_0930_closes`` returns
+    None for those names, the executor SKIPs the EXIT, and the book ends
+    up over-deployed (the 2026-04-26 leverage bug). Fallback chain:
+
+        1. today's signals row
+        2. most recent prior signals row that has a security_id
+        3. universe.csv (every BSE name with a known security_id)
+    """
+    row = conn.execute(
+        "SELECT security_id, exchange_segment FROM signals"
+        " WHERE session_date = ? AND symbol = ? AND security_id IS NOT NULL",
+        (sess.isoformat(), symbol),
+    ).fetchone()
+    if row and row["security_id"]:
+        return row["security_id"], (row["exchange_segment"] or "BSE_EQ")
+
+    row = conn.execute(
+        "SELECT security_id, exchange_segment FROM signals"
+        " WHERE symbol = ? AND security_id IS NOT NULL"
+        " ORDER BY session_date DESC LIMIT 1",
+        (symbol,),
+    ).fetchone()
+    if row and row["security_id"]:
+        return row["security_id"], (row["exchange_segment"] or "BSE_EQ")
+
+    # Universe CSV — schema includes security_id and exchange_segment.
+    try:
+        path = universe_csv_path()
+        if path.exists():
+            df = pd.read_csv(path)
+            hit = df.loc[df["symbol"] == symbol]
+            if not hit.empty:
+                row = hit.iloc[0]
+                sec = row.get("security_id")
+                seg = row.get("exchange_segment", "BSE_EQ") or "BSE_EQ"
+                if pd.notna(sec) and str(sec).strip():
+                    return str(sec), str(seg)
+    except Exception as e:  # noqa: BLE001 — universe is best-effort
+        log.debug("universe lookup failed for %s: %s", symbol, e)
+
+    return None, None
+
+
 async def _fetch_0930_closes(
     dhan: DhanClient,
     conn: sqlite3.Connection,
@@ -710,15 +797,12 @@ async def _fetch_0930_closes(
     from_iso = f"{sess.isoformat()}T09:30:00"
     to_iso = f"{sess.isoformat()}T09:31:00"
     for sym in symbols:
-        row = conn.execute(
-            "SELECT security_id, exchange_segment FROM signals WHERE session_date = ? AND symbol = ?",
-            (sess.isoformat(), sym),
-        ).fetchone()
-        if row is None or not row["security_id"]:
+        sec, seg = _resolve_security(conn, sess, sym)
+        if not sec:
             out[sym] = None
             continue
         try:
-            bars = await dhan.intraday(row["security_id"], row["exchange_segment"] or "BSE_EQ", 1, from_iso, to_iso)
+            bars = await dhan.intraday(sec, seg or "BSE_EQ", 1, from_iso, to_iso)
         except DhanUnavailable as e:
             log.warning("intraday fetch failed for %s: %s", sym, e)
             out[sym] = None

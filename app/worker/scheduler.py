@@ -15,6 +15,7 @@ from app.worker.jobs import (
     execution_job,
     ltp_poll_job,
     market_status_poll_job,
+    paper_mtm_refresh_job,
     recon_job,
     token_expiry_monitor_job,
     token_watcher_job,
@@ -66,6 +67,17 @@ def build_scheduler(dhan: DhanClient) -> AsyncIOScheduler:
     scheduler.add_job(
         ltp_poll_job, CronTrigger(day_of_week="mon-fri", hour="9-15", minute="*", timezone=IST),
         args=(dhan,), id="ltp_poll", coalesce=True, max_instances=1,
+    )
+    # Paper MTM refresh: rewrite today's paper_pnl_daily row using live_ltp
+    # so the headline KPI tiles and the Trade Log portfolio value reflect
+    # the open book's mark-to-market, not just the morning fill snapshot.
+    # Cron is once a minute Mon-Fri across the full day window so the row
+    # also catches the daily close after market hours (the ltp_poll_job's
+    # last 15:30 candle remains the freshest mark until the next session).
+    scheduler.add_job(
+        paper_mtm_refresh_job,
+        CronTrigger(day_of_week="mon-fri", minute="*", timezone=IST),
+        id="paper_mtm_refresh", coalesce=True, max_instances=1,
     )
     # Command inbox poll (FRD B.2). 2-second cadence; matches the doc's
     # "2-second cadence from worker" note for UI → worker signalling.

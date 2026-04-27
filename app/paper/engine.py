@@ -119,9 +119,15 @@ def execute_orders(
     """
     qty_override = qty_override or {}
 
+    # SELLs (TRIM/EXIT) first so realised cash funds the BUYs in this same
+    # session — otherwise a 100% rebalance from "fully invested in 3 names"
+    # to "1 new name" would buy on top of held positions and double-leverage
+    # the book. ORDER BY action puts BUY last (B < E < T alphabetically, but
+    # "BUY" sorts before "EXIT"/"TRIM" — invert with CASE).
     rows = conn.execute(
         "SELECT id, symbol, action, order_qty FROM paper_orders"
-        " WHERE session_date = ? AND status = 'PENDING'",
+        " WHERE session_date = ? AND status = 'PENDING'"
+        " ORDER BY CASE action WHEN 'EXIT' THEN 0 WHEN 'TRIM' THEN 1 ELSE 2 END, id",
         (session_date.isoformat(),),
     ).fetchall()
 
@@ -159,6 +165,54 @@ def execute_orders(
             continue
 
         side = Side.BUY if action == "BUY" else Side.SELL
+
+        # Cash gate: BUYs are funded by the seed plus any SELLs already
+        # executed in this session. Because the row order is SELL-first
+        # (see ORDER BY above), `paper_cash(conn)` here reflects post-SELL
+        # cash. If there isn't enough to fill `qty` at `price` plus
+        # estimated charges, scale the order down to what fits — never
+        # buy on credit. A skip is preferred only when the resulting qty
+        # would be zero.
+        if side is Side.BUY:
+            cash_now = paper_cash(conn)
+            est_charges = compute_charges(side, qty, price).total
+            need = qty * price + est_charges
+            if need > cash_now + 1e-6:
+                # Scale qty down. Iteratively recompute charges since they
+                # depend on qty; one pass is enough for the closed-form
+                # charge schedule used in compute_charges.
+                affordable_qty = max(0, int((cash_now * (1.0 - 0.005)) // price))
+                # Re-check with actual charges at the affordable qty.
+                if affordable_qty > 0:
+                    actual = compute_charges(side, affordable_qty, price).total
+                    while affordable_qty > 0 and (affordable_qty * price + actual) > cash_now:
+                        affordable_qty -= 1
+                        actual = compute_charges(side, affordable_qty, price).total if affordable_qty else 0.0
+                if affordable_qty <= 0:
+                    with tx(conn):
+                        conn.execute(
+                            "UPDATE paper_orders SET status = 'SKIPPED', note = ? WHERE id = ?",
+                            ("insufficient_cash", oid),
+                        )
+                        raise_alert(
+                            conn,
+                            Alert(
+                                severity="warn",
+                                source="paper",
+                                message=(
+                                    f"BUY {sym}: insufficient cash "
+                                    f"(have {cash_now:.2f}, need {need:.2f}); skipped"
+                                ),
+                                payload={"session_date": session_date.isoformat(), "symbol": sym},
+                            ),
+                        )
+                    continue
+                log.warning(
+                    "BUY %s: scaled qty %d -> %d to fit cash %.2f",
+                    sym, qty, affordable_qty, cash_now,
+                )
+                qty = affordable_qty
+
         charges = compute_charges(side, qty, price)
 
         with tx(conn):
@@ -220,26 +274,182 @@ def _apply_to_book(conn: sqlite3.Connection, symbol: str, side: Side, qty: int, 
             )
 
 
-def compute_daily_pnl(conn: sqlite3.Connection, session_date: date, ltp_fetcher: PriceFetcher) -> dict:
+def _cost_basis_realized_per_session(conn: sqlite3.Connection) -> dict[str, float]:
+    """Replay all paper_fills in chronological order through a running
+    average-cost book and return ``{session_date: realized_pnl}``.
+
+    Realised on a SELL = ``(fill_price - avg_cost_at_time) * fill_qty`` —
+    the same average-cost method ``_apply_to_book`` uses on the live
+    ``paper_book``. Used both by ``compute_daily_pnl`` (writing
+    ``paper_pnl_daily.realized``) and by the headline KPI / trade-log
+    views, so the two never diverge. Cheap enough to recompute every
+    call: ``paper_fills`` is small.
+
+    Charges are excluded — they surface separately at the foot of the
+    Trade Log so the headline numbers track gross gain/loss.
+    """
+    state: dict[str, dict] = {}  # symbol -> {qty, cost_basis}
+    out: dict[str, float] = {}
+    for r in conn.execute(
+        "SELECT session_date, symbol, side, fill_qty, fill_price"
+        " FROM paper_fills ORDER BY filled_at, id"
+    ):
+        sd = r["session_date"]
+        sym = r["symbol"]
+        st = state.setdefault(sym, {"qty": 0, "cost_basis": 0.0})
+        qty = int(r["fill_qty"])
+        price = float(r["fill_price"])
+        if r["side"] == "BUY":
+            st["qty"] += qty
+            st["cost_basis"] += qty * price
+        else:  # SELL
+            if st["qty"] <= 0:
+                continue  # selling something we don't own; ignore
+            avg = st["cost_basis"] / st["qty"]
+            sell_qty = min(qty, st["qty"])
+            pnl = (price - avg) * sell_qty
+            out[sd] = out.get(sd, 0.0) + pnl
+            st["cost_basis"] -= avg * sell_qty
+            st["qty"] -= sell_qty
+            if st["qty"] == 0:
+                st["cost_basis"] = 0.0
+    return out
+
+
+PAPER_INITIAL_CAPITAL_KEY = "paper_initial_capital"
+PAPER_INITIAL_CAPITAL_DEFAULT = 100_000.0
+
+
+def paper_initial_capital(conn: sqlite3.Connection) -> float:
+    """Seed cash for the paper book. Defaults to ₹1L; overridable via the
+    ``settings.paper_initial_capital`` row so a future "fund my paper account"
+    UI can change it without code edits."""
+    row = conn.execute(
+        "SELECT value FROM settings WHERE key = ?", (PAPER_INITIAL_CAPITAL_KEY,)
+    ).fetchone()
+    if row:
+        try:
+            return float(row["value"])
+        except (TypeError, ValueError):
+            pass
+    return PAPER_INITIAL_CAPITAL_DEFAULT
+
+
+def paper_cash(conn: sqlite3.Connection) -> float:
+    """Cash available to the paper book = seed - net BUY/SELL notional - charges.
+
+    Recomputed from ``paper_fills`` every call so we never drift out of sync
+    with positions; the table is small and indexed. Charges are tracked even
+    though brokerage is zero on Dhan CNC delivery — non-broker statutory
+    charges (STT, exchange txn, SEBI, stamp, GST) still leak real cash.
+    """
+    seed = paper_initial_capital(conn)
+    cash = seed
+    for f in conn.execute(
+        "SELECT side, fill_qty, fill_price, charges_total FROM paper_fills"
+    ):
+        notional = float(f["fill_qty"]) * float(f["fill_price"])
+        charges = float(f["charges_total"] or 0.0)
+        if f["side"] == "BUY":
+            cash -= notional + charges
+        else:  # SELL
+            cash += notional - charges
+    return cash
+
+
+def paper_portfolio_value(conn: sqlite3.Connection) -> float:
+    """Current portfolio value = cash + sum(qty × marked_price) for open
+    positions. Marked price uses the same fallback chain as
+    ``web.views.book_rich``: ``live_ltp`` → last BUY fill price →
+    ``avg_cost`` (so a fresh entry contributes notional == cost basis,
+    not zero).
+
+    This is the number the rebalance should size against — never a
+    hardcoded notional. Otherwise every rebalance assumes a fresh seed
+    and either over-deploys (the 2026-04-26 leverage bug) or chronically
+    under-deploys a winning portfolio.
+    """
+    cash = paper_cash(conn)
+    mv = 0.0
+    fetcher = _build_fallback_ltp_fetcher(conn)
+    for r in conn.execute("SELECT symbol, qty, avg_cost FROM paper_book"):
+        qty = int(r["qty"])
+        if qty <= 0:
+            continue
+        price = fetcher(r["symbol"])
+        if price is None:
+            price = float(r["avg_cost"])
+        mv += qty * float(price)
+    return cash + mv
+
+
+def _build_fallback_ltp_fetcher(conn: sqlite3.Connection) -> PriceFetcher:
+    """Default LTP fetcher used when no explicit one is supplied.
+
+    Mirrors the priority chain in ``web.views.book_rich`` so the headline
+    KPI tile and the Current Paper Book agree on marked prices:
+
+        live_ltp (worker-polled minute candle) → last BUY fill price → unknown
+
+    "unknown" means the per-symbol contribution to unrealized is zero (the
+    caller's ``continue``). Last-fill fallback yields zero for fresh entries
+    too (LTP == avg_cost on the day of fill), but keeps positions priced
+    overnight / over weekends when ``live_ltp`` is empty so the row doesn't
+    silently re-zero on every off-hours refresh.
+    """
+    ltp_map: dict[str, float] = {}
+    try:
+        for r in conn.execute("SELECT symbol, ltp FROM live_ltp"):
+            ltp_map[r["symbol"]] = float(r["ltp"])
+    except sqlite3.OperationalError:
+        pass
+
+    last_buy: dict[str, float] = {}
+    for r in conn.execute(
+        "SELECT symbol, fill_price FROM paper_fills WHERE side='BUY' ORDER BY filled_at"
+    ):
+        last_buy[r["symbol"]] = float(r["fill_price"])
+
+    def fetch(symbol: str) -> float | None:
+        if symbol in ltp_map:
+            return ltp_map[symbol]
+        if symbol in last_buy:
+            return last_buy[symbol]
+        return None
+
+    return fetch
+
+
+def compute_daily_pnl(
+    conn: sqlite3.Connection,
+    session_date: date,
+    ltp_fetcher: PriceFetcher | None = None,
+) -> dict:
     """Realized = sum of sell gains this session; unrealized = book vs LTP.
 
     Non-broker charges (STT, exch txn, SEBI, stamp, GST) are **not** deducted
     from realized P&L — they surface separately at the foot of the Trade Log
     so the headline numbers track gross gain/loss. Brokerage is zero for Dhan
     CNC delivery so no broker-fee leakage either.
+
+    ``ltp_fetcher`` is optional. The 09:30 execution job passes its
+    same-session 09:30 close fetcher; the periodic MTM refresh job (FRD B.5)
+    passes nothing and lets us build the ``live_ltp``-based fallback chain
+    so today's row stays in sync with the open paper book even outside the
+    market window.
     """
-    realized = 0.0
-    for r in conn.execute(
-        "SELECT symbol, side, fill_qty, fill_price FROM paper_fills WHERE session_date = ?",
-        (session_date.isoformat(),),
-    ):
-        if r["side"] == "SELL":
-            # v1 approximation: treat SELL notional as realized (cost-basis
-            # is tracked via paper_book). Parity with the trade-log replay in
-            # web.views is maintained as long as both exclude charges.
-            realized += float(r["fill_qty"]) * float(r["fill_price"])
-        # BUYs contribute nothing to realized — entries aren't "realized" until
-        # a subsequent SELL closes the leg, and we no longer charge entry fees.
+    if ltp_fetcher is None:
+        ltp_fetcher = _build_fallback_ltp_fetcher(conn)
+
+    # Realized = cost-basis P&L on SELLs in this session, computed by
+    # replaying the full fills history through a running average-cost book.
+    # The previous v1 implementation summed SELL *notional* and was wrong by
+    # the cost basis — fine when there were no SELLs (Champion B was buy-and-
+    # hold for two days), broken the moment a rebalance fired an EXIT. Parity
+    # with the trade-log replay in web.views.day_grouped_trade_log is now
+    # exact (both use this helper).
+    per_day_realized = _cost_basis_realized_per_session(conn)
+    realized = float(per_day_realized.get(session_date.isoformat(), 0.0))
 
     unreal = 0.0
     for r in conn.execute("SELECT symbol, qty, avg_cost FROM paper_book"):
