@@ -1,7 +1,9 @@
 """Tests for the paper engine. FRD B.6."""
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
+
+from app.time_utils import IST
 
 import pytest
 
@@ -177,6 +179,88 @@ def test_pnl_falls_back_to_last_buy_when_live_ltp_empty(db):
     assert out["realized"] == pytest.approx(0.0)
 
 
+def test_today_change_excludes_carried_over_unrealized(db, monkeypatch):
+    """Today's Change must equal `today_realized + (current_unrealized -
+    prior_eod_unrealized)`, NOT just `today_realized + current_unrealized`.
+    Otherwise a buy-and-hold day with zero price move shows the running
+    unrealized (carried over from a prior session) as if it happened today.
+
+    Scenario: position opened on day 1 at avg_cost 100; price closed at 90
+    so EOD unrealized = -100 (× 10 shares). Day 2 opens with the same
+    price (still 90, no intraday move). Today's Change should be ~0,
+    not -100.
+    """
+    from app.web.views import paper_summary
+
+    d1 = date(2026, 4, 21)  # prior session
+    d2 = date(2026, 4, 22)  # today
+
+    # Open the position on day 1 at fill_price 100.
+    _seed_signals(db, d1, [("CDG", 1, 10)])
+    generate_orders(db, d1)
+    execute_orders(db, d1, price_fetcher=lambda s: 100.0)
+
+    # Day 1 EOD: price closed at 90 → unrealized = -100. Pin it in
+    # paper_pnl_daily as if the refresh job wrote yesterday's last value.
+    with tx(db):
+        db.execute(
+            "INSERT INTO paper_pnl_daily (session_date, realized, unrealized, mtm, computed_at)"
+            " VALUES (?, 0.0, -100.0, -100.0, ?)",
+            (d1.isoformat(), f"{d1.isoformat()}T15:30:00+05:30"),
+        )
+
+    # Day 2: price unchanged at 90 → current unrealized still -100.
+    with tx(db):
+        db.execute(
+            "INSERT INTO live_ltp (symbol, ltp, fetched_at) VALUES (?, 90.0, ?)",
+            ("CDG", f"{d2.isoformat()}T09:30:00+05:30"),
+        )
+
+    # Pin "now" to day 2 so session_date_for(now) returns d2.
+    fake_now = datetime(2026, 4, 22, 10, 0, 0, tzinfo=IST)
+    monkeypatch.setattr("app.web.views.now_ist", lambda: fake_now)
+
+    s = paper_summary(db)
+    # Running unrealized still −100 (Unrealized tile, parity with Book table).
+    assert s["today_unrealized"] == pytest.approx(-100.0)
+    # Today's change is intraday delta = current − prior EOD unrealized = 0.
+    assert s["today_mtm"] == pytest.approx(0.0)
+    # No SELLs today.
+    assert s["today_realized"] == pytest.approx(0.0)
+
+
+def test_today_change_captures_intraday_move(db, monkeypatch):
+    """If price actually moves today, Today's Change reflects only the
+    intraday move, not the running unrealized."""
+    from app.web.views import paper_summary
+
+    d1 = date(2026, 4, 21)
+    d2 = date(2026, 4, 22)
+    _seed_signals(db, d1, [("CDG", 1, 10)])
+    generate_orders(db, d1)
+    execute_orders(db, d1, price_fetcher=lambda s: 100.0)
+    # Day 1 EOD: -100 (price 90 vs avg 100, ×10).
+    with tx(db):
+        db.execute(
+            "INSERT INTO paper_pnl_daily (session_date, realized, unrealized, mtm, computed_at)"
+            " VALUES (?, 0.0, -100.0, -100.0, ?)",
+            (d1.isoformat(), f"{d1.isoformat()}T15:30:00+05:30"),
+        )
+    # Day 2: price climbs back to 95 → running unrealized = -50, but today's
+    # change = -50 - (-100) = +50.
+    with tx(db):
+        db.execute(
+            "INSERT INTO live_ltp (symbol, ltp, fetched_at) VALUES (?, 95.0, ?)",
+            ("CDG", f"{d2.isoformat()}T11:00:00+05:30"),
+        )
+    fake_now = datetime(2026, 4, 22, 11, 0, 0, tzinfo=IST)
+    monkeypatch.setattr("app.web.views.now_ist", lambda: fake_now)
+
+    s = paper_summary(db)
+    assert s["today_unrealized"] == pytest.approx(-50.0)  # running
+    assert s["today_mtm"] == pytest.approx(50.0)           # intraday delta
+
+
 def test_summary_uses_provided_book_avoiding_live_ltp_race(db):
     """If the caller passes ``book``, the KPI tile reuses it instead of
     re-reading ``live_ltp`` — preventing a divergence when the worker
@@ -250,8 +334,6 @@ def test_summary_unrealized_matches_current_book_total(db):
     # Live truth: 10 * (130 - 100) = 300, NOT the stale 100 in paper_pnl_daily.
     assert s["today_unrealized"] == pytest.approx(300.0)
     assert s["today_unrealized"] == pytest.approx(book_total)
-    # today_mtm and cumulative also rebuild off live unrealized.
-    assert s["today_mtm"] == pytest.approx(s["today_realized"] + s["today_unrealized"])
 
 
 def test_summary_includes_portfolio_value_for_paper(db):

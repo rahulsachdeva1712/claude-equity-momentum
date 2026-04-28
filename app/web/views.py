@@ -15,7 +15,7 @@ from datetime import date, datetime, time, timezone
 from typing import Any
 
 from app.dhan.client import jwt_expiry_epoch
-from app.time_utils import IST
+from app.time_utils import IST, now_ist, session_date_for
 
 
 # --------------------------------------------------------------------------
@@ -54,25 +54,45 @@ def _summary(conn: sqlite3.Connection, prefix: str, book: list[dict] | None = No
             if r["side"] == "SELL":
                 realized_total += r["fill_qty"] * r["fill_price"]
 
-    # Realized for today still reads paper_pnl_daily — it only changes when a
-    # new SELL fills, so a once-per-minute refresh is fine. **Unrealized must
-    # be computed live** off the same source the Current Book table uses
-    # (book_rich), otherwise the KPI tile and the per-row Unrealized PnL
-    # diverge between refresh ticks: paper_pnl_daily.unrealized was last
-    # written on the previous minute's `live_ltp` snapshot, while book_rich
-    # reads `live_ltp` fresh on every render.
-    latest = conn.execute(
-        f"SELECT realized, unrealized, mtm FROM {prefix}_pnl_daily"
-        " ORDER BY session_date DESC LIMIT 1"
+    # `today_realized` is realized P&L from this session only — read the row
+    # for today's session_date specifically, not just "latest". Otherwise a
+    # day with no fills at all (worker not yet refreshed today's row) would
+    # read yesterday's realized as if it were today's.
+    sess_today = session_date_for(now_ist())
+    today_row = conn.execute(
+        f"SELECT realized FROM {prefix}_pnl_daily WHERE session_date = ?",
+        (sess_today.isoformat(),),
     ).fetchone()
-    today_realized = float(latest["realized"]) if latest else 0.0
+    today_realized = float(today_row["realized"]) if today_row else 0.0
+
+    # `today_unrealized` is the **running** open-position MTM (vs. avg_cost),
+    # computed live from the same `book_rich` snapshot the Current Book table
+    # uses — same number on tile and table, no live_ltp race.
     if book is None:
         book = book_rich(conn, prefix)
     today_unrealized = sum(float(b["unrealized_pnl"]) for b in book)
+
+    # `today_change` is the headline "what did the portfolio do *today*"
+    # number. Equals today's realized + (current unrealized − yesterday's
+    # EOD unrealized). The subtraction matters: a position carried over from
+    # yesterday already had a running unrealized at yesterday's close, and
+    # that piece is yesterday's P&L, not today's. Earlier this read
+    # `today_realized + today_unrealized` (running) which double-counted
+    # carried-over unrealized as today's P&L — flagged by the user when a
+    # buy-and-hold day with zero price move read −₹178.86 instead of ~₹0.
+    prior = conn.execute(
+        f"SELECT unrealized FROM {prefix}_pnl_daily"
+        " WHERE session_date < ? ORDER BY session_date DESC LIMIT 1",
+        (sess_today.isoformat(),),
+    ).fetchone()
+    prior_eod_unrealized = float(prior["unrealized"]) if prior else 0.0
+    today_change = today_realized + (today_unrealized - prior_eod_unrealized)
+
     today = {
         "realized": today_realized,
-        "unrealized": today_unrealized,
-        "mtm": today_realized + today_unrealized,
+        "unrealized": today_unrealized,           # running, for Unrealized tile
+        "mtm": today_change,                       # intraday delta, for Today's Change
+        "prior_eod_unrealized": prior_eod_unrealized,
     }
 
     # `book` (the position list) is the in-memory snapshot we rely on for
